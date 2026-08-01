@@ -5,7 +5,7 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from core.config import settings
 from core.database import get_db, execute
-from passlib.context import CryptContext
+import bcrypt
 import hashlib
 
 # Passwords are hashed with bcrypt (salted, deliberately slow — the right
@@ -15,11 +15,20 @@ import hashlib
 # transparently re-hashes them to bcrypt on next successful login, so every
 # account migrates to the stronger scheme as people log in rather than
 # needing a one-time mass password reset.
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+#
+# Uses the `bcrypt` package directly rather than passlib's CryptContext:
+# passlib 1.7.4 tries to read bcrypt's version via bcrypt.__about__.__version__,
+# which was removed in bcrypt 4.0+, so passlib crashes on any bcrypt call
+# once pip installs a modern bcrypt (which it will, since requirements.txt
+# doesn't pin bcrypt's own version). Calling bcrypt directly avoids that
+# whole class of version-compatibility bug.
 bearer_scheme = HTTPBearer()
 
 def hash_password(password: str) -> str:
-    return pwd_context.hash(password)
+    # bcrypt silently ignores bytes past 72 — truncate explicitly so long
+    # passwords don't fail differently at hash-time vs verify-time.
+    truncated = password.encode("utf-8")[:72]
+    return bcrypt.hashpw(truncated, bcrypt.gensalt()).decode("utf-8")
 
 def is_legacy_hash(hashed: str) -> bool:
     """True for the old unsalted-SHA-256 scheme, False for bcrypt."""
@@ -28,7 +37,10 @@ def is_legacy_hash(hashed: str) -> bool:
 def verify_password(plain: str, hashed: str) -> bool:
     if is_legacy_hash(hashed):
         return hashlib.sha256(plain.encode()).hexdigest() == hashed
-    return pwd_context.verify(plain, hashed)
+    try:
+        return bcrypt.checkpw(plain.encode("utf-8")[:72], hashed.encode("utf-8"))
+    except ValueError:
+        return False
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     to_encode = data.copy()
