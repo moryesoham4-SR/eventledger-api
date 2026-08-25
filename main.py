@@ -3,7 +3,7 @@ EventLedger AI — FastAPI Backend v2.0
 """
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from routers import auth, events, departments, budget, income, expenses, sponsors, vendors, notifications, users, event_data, reports, activity
+from routers import auth, events, departments, budget, income, expenses, sponsors, vendors, notifications, users, event_data, reports, activity, vendor_quotes
 
 app = FastAPI(
     title="EventLedger AI API",
@@ -26,6 +26,7 @@ app.include_router(reports.router)
 app.include_router(activity.router)
 app.include_router(departments.router)
 app.include_router(budget.router)
+app.include_router(vendor_quotes.router)
 app.include_router(income.router)
 app.include_router(expenses.router)
 app.include_router(sponsors.router)
