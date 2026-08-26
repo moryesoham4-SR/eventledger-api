@@ -34,41 +34,50 @@ def send_reset_email(to_email: str, code: str):
     from email.mime.text import MIMEText
     from email.mime.multipart import MIMEMultipart
 
-    smtp_server = os.getenv("SMTP_SERVER", "smtp.gmail.com")
-    smtp_port = int(os.getenv("SMTP_PORT", "587"))
     sender_email = os.getenv("SMTP_EMAIL", "moryesoham4@gmail.com").strip()
     sender_password = os.getenv("SMTP_PASSWORD", "nbpcyvdiqbnbyvwj").replace(" ", "").strip()
 
-    if sender_email and sender_password:
-        try:
-            msg = MIMEMultipart("alternative")
-            msg["Subject"] = f"EventLedger AI - Your Reset Code: {code}"
-            msg["From"] = f"EventLedger AI <{sender_email}>"
-            msg["To"] = to_email
+    if not sender_email or not sender_password:
+        print("SMTP Email Error: sender_email or sender_password missing")
+        return
 
-            html = f"""
-            <div style="font-family: Arial, sans-serif; padding: 24px; background-color: #0F172A; color: #F8FAFC; border-radius: 12px;">
-              <h2 style="color: #FF7A00; margin-top: 0;">EventLedger AI - Password Reset</h2>
-              <p>You requested to reset your password. Use the 6-digit verification code below:</p>
-              <div style="font-size: 32px; font-weight: bold; letter-spacing: 6px; color: #10B981; padding: 12px 24px; background: #1E293B; display: inline-block; border-radius: 8px; margin: 16px 0;">
-                {code}
-              </div>
-              <p style="color: #94A3B8; font-size: 12px;">If you did not request this, please ignore this email.</p>
-            </div>
-            """
-            msg.attach(MIMEText(html, "html"))
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = f"EventLedger AI - Your Reset Code: {code}"
+    msg["From"] = f"EventLedger AI <{sender_email}>"
+    msg["To"] = to_email
 
-            if smtp_port == 465:
-                with smtplib.SMTP_SSL(smtp_server, smtp_port, timeout=10) as server:
-                    server.login(sender_email, sender_password)
-                    server.sendmail(sender_email, to_email, msg.as_string())
-            else:
-                with smtplib.SMTP(smtp_server, smtp_port, timeout=10) as server:
-                    server.starttls()
-                    server.login(sender_email, sender_password)
-                    server.sendmail(sender_email, to_email, msg.as_string())
-        except Exception as e:
-            print(f"SMTP Email Error: {e}")
+    html = f"""
+    <div style="font-family: Arial, sans-serif; padding: 24px; background-color: #0F172A; color: #F8FAFC; border-radius: 12px;">
+      <h2 style="color: #FF7A00; margin-top: 0;">EventLedger AI - Password Reset</h2>
+      <p>You requested to reset your password. Use the 6-digit verification code below:</p>
+      <div style="font-size: 32px; font-weight: bold; letter-spacing: 6px; color: #10B981; padding: 12px 24px; background: #1E293B; display: inline-block; border-radius: 8px; margin: 16px 0;">
+        {code}
+      </div>
+      <p style="color: #94A3B8; font-size: 12px;">If you did not request this, please ignore this email.</p>
+    </div>
+    """
+    msg.attach(MIMEText(html, "html"))
+
+    # Try SSL (port 465) first (preferred on Cloud Hosts)
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=10) as server:
+            server.login(sender_email, sender_password)
+            server.sendmail(sender_email, to_email, msg.as_string())
+            print(f"Successfully sent reset code email to {to_email} via SSL:465")
+            return
+    except Exception as e1:
+        print(f"SSL:465 email send failed: {e1}")
+
+    # Fallback to TLS (port 587)
+    try:
+        with smtplib.SMTP("smtp.gmail.com", 587, timeout=10) as server:
+            server.starttls()
+            server.login(sender_email, sender_password)
+            server.sendmail(sender_email, to_email, msg.as_string())
+            print(f"Successfully sent reset code email to {to_email} via TLS:587")
+            return
+    except Exception as e2:
+        print(f"TLS:587 email send failed: {e2}")
 
 @router.post("/forgot-password")
 def forgot_password(data: ForgotPasswordRequest, conn=Depends(get_db)):
