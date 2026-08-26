@@ -80,15 +80,15 @@ def google_login(data: GoogleLoginRequest, conn=Depends(get_db)):
         raise HTTPException(status_code=400, detail="Invalid Google authentication token")
 
     email = email.lower()
-    cur = execute(conn, "SELECT * FROM users WHERE email=%s AND is_active=1", (email,))
+    cur = execute(conn, "SELECT * FROM users WHERE email=%s", (email,))
     user = cur.fetchone()
     
     if not user:
         random_password = hash_password(f"google_{email}_secret")
         cur = execute(
             conn,
-            "INSERT INTO users (name, email, password, role, is_super_admin, org_name, avatar_color) VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING *",
-            (name, email, random_password, "event_admin", 0, "Google User", "#4285F4")
+            "INSERT INTO users (name, email, password, role, is_super_admin, org_name) VALUES (%s, %s, %s, %s, %s, %s) RETURNING *",
+            (name, email, random_password, "event_admin", 0, "Google User")
         )
         user = cur.fetchone()
         
