@@ -36,8 +36,8 @@ def send_reset_email(to_email: str, code: str):
 
     smtp_server = os.getenv("SMTP_SERVER", "smtp.gmail.com")
     smtp_port = int(os.getenv("SMTP_PORT", "587"))
-    sender_email = os.getenv("SMTP_EMAIL", "")
-    sender_password = os.getenv("SMTP_PASSWORD", "")
+    sender_email = os.getenv("SMTP_EMAIL", "moryesoham4@gmail.com").strip()
+    sender_password = os.getenv("SMTP_PASSWORD", "nbpcyvdiqbnbyvwj").replace(" ", "").strip()
 
     if sender_email and sender_password:
         try:
@@ -58,10 +58,15 @@ def send_reset_email(to_email: str, code: str):
             """
             msg.attach(MIMEText(html, "html"))
 
-            with smtplib.SMTP(smtp_server, smtp_port, timeout=10) as server:
-                server.starttls()
-                server.login(sender_email, sender_password)
-                server.sendmail(sender_email, to_email, msg.as_string())
+            if smtp_port == 465:
+                with smtplib.SMTP_SSL(smtp_server, smtp_port, timeout=10) as server:
+                    server.login(sender_email, sender_password)
+                    server.sendmail(sender_email, to_email, msg.as_string())
+            else:
+                with smtplib.SMTP(smtp_server, smtp_port, timeout=10) as server:
+                    server.starttls()
+                    server.login(sender_email, sender_password)
+                    server.sendmail(sender_email, to_email, msg.as_string())
         except Exception as e:
             print(f"SMTP Email Error: {e}")
 
