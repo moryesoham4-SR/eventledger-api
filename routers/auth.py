@@ -41,8 +41,7 @@ def forgot_password(data: ForgotPasswordRequest, conn=Depends(get_db)):
     RESET_CODES[email] = code
     return {
         "ok": True,
-        "message": f"Reset code generated for {email}",
-        "reset_code": code
+        "message": f"A 6-digit reset code has been sent to {email}. Please check your email inbox."
     }
 
 @router.post("/reset-password-confirm")
