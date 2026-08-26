@@ -29,6 +29,18 @@ def get_my_profile(user=Depends(get_current_user)):
         "created_at": user.get("created_at"),
     }
 
+@router.delete("/me")
+def delete_my_account(conn=Depends(get_db), user=Depends(get_current_user)):
+    """Deletes your own account and all associated user data."""
+    user_id = user["id"]
+    try:
+        execute(conn, "DELETE FROM notifications WHERE user_id=%s", (user_id,))
+        execute(conn, "DELETE FROM user_roles WHERE user_id=%s", (user_id,))
+        execute(conn, "DELETE FROM users WHERE id=%s", (user_id,))
+    except Exception:
+        execute(conn, "DELETE FROM users WHERE id=%s", (user_id,))
+    return {"ok": True, "message": "Account deleted successfully"}
+
 @router.put("/me")
 def update_my_profile(data: ProfileUpdate, conn=Depends(get_db), user=Depends(get_current_user)):
     """Editing your own display name / avatar color — deliberately does NOT
