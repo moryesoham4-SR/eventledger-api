@@ -19,6 +19,43 @@ class RegisterRequest(BaseModel):
 class GoogleLoginRequest(BaseModel):
     id_token: str
 
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
+class ResetPasswordConfirmRequest(BaseModel):
+    email: str
+    reset_code: str
+    new_password: str
+
+RESET_CODES = {}
+
+@router.post("/forgot-password")
+def forgot_password(data: ForgotPasswordRequest, conn=Depends(get_db)):
+    email = data.email.lower().strip()
+    cur = execute(conn, "SELECT id, name FROM users WHERE email=%s", (email,))
+    user = cur.fetchone()
+    if not user:
+        raise HTTPException(status_code=404, detail="No account found with this email address")
+    import random
+    code = f"{random.randint(100000, 999999)}"
+    RESET_CODES[email] = code
+    return {
+        "ok": True,
+        "message": f"Reset code generated for {email}",
+        "reset_code": code
+    }
+
+@router.post("/reset-password-confirm")
+def reset_password_confirm(data: ResetPasswordConfirmRequest, conn=Depends(get_db)):
+    email = data.email.lower().strip()
+    stored_code = RESET_CODES.get(email)
+    if not stored_code or stored_code != data.reset_code.strip():
+        raise HTTPException(status_code=400, detail="Invalid or expired reset code")
+    new_hash = hash_password(data.new_password)
+    execute(conn, "UPDATE users SET password=%s WHERE email=%s", (new_hash, email))
+    RESET_CODES.pop(email, None)
+    return {"ok": True, "message": "Password reset successfully"}
+
 @router.post("/login")
 def login(data: LoginRequest, conn=Depends(get_db)):
     cur = execute(conn, "SELECT * FROM users WHERE email=%s AND is_active=1", (data.email.lower(),))
