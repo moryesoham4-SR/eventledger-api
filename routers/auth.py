@@ -29,6 +29,42 @@ class ResetPasswordConfirmRequest(BaseModel):
 
 RESET_CODES = {}
 
+def send_reset_email(to_email: str, code: str):
+    import os, smtplib
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+
+    smtp_server = os.getenv("SMTP_SERVER", "smtp.gmail.com")
+    smtp_port = int(os.getenv("SMTP_PORT", "587"))
+    sender_email = os.getenv("SMTP_EMAIL", "")
+    sender_password = os.getenv("SMTP_PASSWORD", "")
+
+    if sender_email and sender_password:
+        try:
+            msg = MIMEMultipart("alternative")
+            msg["Subject"] = f"EventLedger AI - Your Reset Code: {code}"
+            msg["From"] = f"EventLedger AI <{sender_email}>"
+            msg["To"] = to_email
+
+            html = f"""
+            <div style="font-family: Arial, sans-serif; padding: 24px; background-color: #0F172A; color: #F8FAFC; border-radius: 12px;">
+              <h2 style="color: #FF7A00; margin-top: 0;">EventLedger AI - Password Reset</h2>
+              <p>You requested to reset your password. Use the 6-digit verification code below:</p>
+              <div style="font-size: 32px; font-weight: bold; letter-spacing: 6px; color: #10B981; padding: 12px 24px; background: #1E293B; display: inline-block; border-radius: 8px; margin: 16px 0;">
+                {code}
+              </div>
+              <p style="color: #94A3B8; font-size: 12px;">If you did not request this, please ignore this email.</p>
+            </div>
+            """
+            msg.attach(MIMEText(html, "html"))
+
+            with smtplib.SMTP(smtp_server, smtp_port, timeout=10) as server:
+                server.starttls()
+                server.login(sender_email, sender_password)
+                server.sendmail(sender_email, to_email, msg.as_string())
+        except Exception as e:
+            print(f"SMTP Email Error: {e}")
+
 @router.post("/forgot-password")
 def forgot_password(data: ForgotPasswordRequest, conn=Depends(get_db)):
     email = data.email.lower().strip()
@@ -39,6 +75,10 @@ def forgot_password(data: ForgotPasswordRequest, conn=Depends(get_db)):
     import random
     code = f"{random.randint(100000, 999999)}"
     RESET_CODES[email] = code
+    
+    # Send email if SMTP is configured
+    send_reset_email(email, code)
+
     return {
         "ok": True,
         "message": f"A 6-digit reset code has been sent to {email}. Please check your email inbox."
