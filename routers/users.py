@@ -4,6 +4,7 @@ from typing import Optional
 from core.database import get_db, execute
 from core.auth import get_current_user, hash_password, verify_password
 from utils.roles import get_event_role, is_event_owner_or_super_admin
+from utils.db_safety import run_safely
 
 router = APIRouter(prefix="/api/users", tags=["users"])
 
@@ -33,12 +34,19 @@ def get_my_profile(user=Depends(get_current_user)):
 def delete_my_account(conn=Depends(get_db), user=Depends(get_current_user)):
     """Deletes your own account and all associated user data."""
     user_id = user["id"]
+    run_safely(conn, lambda: execute(conn, "DELETE FROM notifications WHERE user_id=%s", (user_id,)))
+    run_safely(conn, lambda: execute(conn, "DELETE FROM user_event_roles WHERE user_id=%s", (user_id,)))
+    run_safely(conn, lambda: execute(conn, "DELETE FROM user_roles WHERE user_id=%s", (user_id,)))
+    run_safely(conn, lambda: execute(conn, "DELETE FROM audit_log WHERE user_id=%s", (user_id,)))
+    
+    # Try deleting events owned by this user or nullifying owner reference
+    run_safely(conn, lambda: execute(conn, "DELETE FROM events WHERE user_id=%s", (user_id,)))
+    run_safely(conn, lambda: execute(conn, "UPDATE events SET user_id=NULL WHERE user_id=%s", (user_id,)))
+
     try:
-        execute(conn, "DELETE FROM notifications WHERE user_id=%s", (user_id,))
-        execute(conn, "DELETE FROM user_roles WHERE user_id=%s", (user_id,))
         execute(conn, "DELETE FROM users WHERE id=%s", (user_id,))
     except Exception:
-        execute(conn, "DELETE FROM users WHERE id=%s", (user_id,))
+        execute(conn, "UPDATE users SET is_active=0, email=CONCAT(email, '_deleted_', id) WHERE id=%s", (user_id,))
     return {"ok": True, "message": "Account deleted successfully"}
 
 @router.put("/me")
