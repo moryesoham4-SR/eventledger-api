@@ -3,8 +3,9 @@ from pydantic import BaseModel
 from typing import Optional
 from core.database import get_db, execute
 from core.auth import get_current_user
-from utils.roles import get_event_role, can_access_department, can_edit_department
+from utils.roles import get_event_role
 from utils.db_safety import run_safely
+from utils.activity import log_activity, ACTION_TASK_ASSIGNED, ACTION_TASK_UPDATED
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
@@ -25,6 +26,11 @@ def ensure_tasks_schema(conn):
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
     """))
+
+def is_admin_or_cohead(user: dict, role_ctx: dict) -> bool:
+    if user.get("is_super_admin"):
+        return True
+    return role_ctx["level"] in ("event_admin", "co_host")
 
 class TaskCreate(BaseModel):
     event_id: int
@@ -77,12 +83,34 @@ def get_tasks(event_id: int, dept_id: Optional[int] = None, conn=Depends(get_db)
     cur = execute(conn, query, tuple(params))
     return [dict(r) for r in cur.fetchall()]
 
+@router.get("/summary")
+def get_tasks_summary(event_id: int, conn=Depends(get_db), user=Depends(get_current_user)):
+    ensure_tasks_schema(conn)
+    role_ctx = get_event_role(conn, user, event_id)
+    if role_ctx["level"] is None:
+        raise HTTPException(status_code=403, detail="You don't have access to this event")
+
+    cur = execute(conn, """
+        SELECT d.id as dept_id, d.name as dept_name, d.head_name, d.color as dept_color,
+               COUNT(t.id) as total_given,
+               COUNT(CASE WHEN t.status = 'completed' THEN 1 END) as total_completed,
+               COUNT(CASE WHEN t.status != 'completed' THEN 1 END) as total_pending
+        FROM departments d
+        LEFT JOIN department_tasks t ON t.department_id = d.id
+        WHERE d.event_id = %s
+        GROUP BY d.id, d.name, d.head_name, d.color
+        ORDER BY d.name
+    """, (event_id,))
+    return [dict(r) for r in cur.fetchall()]
+
 @router.post("/")
 def create_task(data: TaskCreate, conn=Depends(get_db), user=Depends(get_current_user)):
     ensure_tasks_schema(conn)
     role_ctx = get_event_role(conn, user, data.event_id)
-    if not can_edit_department(role_ctx, data.department_id):
-        raise HTTPException(status_code=403, detail="You cannot assign work in this department")
+    
+    # Authority restricted strictly to Super Admin, Event Head, or Co-Head
+    if not is_admin_or_cohead(user, role_ctx):
+        raise HTTPException(status_code=403, detail="Only Super Admin, Event Head, or Co-Head can assign work tasks")
 
     cur = execute(conn, """
         INSERT INTO department_tasks
@@ -94,6 +122,10 @@ def create_task(data: TaskCreate, conn=Depends(get_db), user=Depends(get_current
         data.title, data.description, data.deadline, data.priority, data.status, user["id"]
     ))
     task = dict(cur.fetchone())
+
+    # Log to recent activity
+    assignee_label = data.assigned_to_name or "team member"
+    log_activity(conn, data.event_id, user["id"], ACTION_TASK_ASSIGNED, f"{user['name']} assigned work '{data.title}' to {assignee_label}")
 
     # Dispatch notification to assignee if user_id is provided
     if data.assigned_to_user_id:
@@ -117,7 +149,13 @@ def update_task(task_id: int, data: TaskUpdate, conn=Depends(get_db), user=Depen
         raise HTTPException(status_code=404, detail="Task not found")
 
     role_ctx = get_event_role(conn, user, task["event_id"])
-    if not can_edit_department(role_ctx, task["department_id"]) and task["assigned_to_user_id"] != user["id"]:
+    can_update = (
+        is_admin_or_cohead(user, role_ctx)
+        or task["assigned_to_user_id"] == user["id"]
+        or (role_ctx["level"] == "dept_head" and str(role_ctx["dept_id"]) == str(task["department_id"]))
+    )
+
+    if not can_update:
         raise HTTPException(status_code=403, detail="You cannot modify this task")
 
     fields = {k: v for k, v in data.dict().items() if v is not None}
@@ -127,7 +165,13 @@ def update_task(task_id: int, data: TaskUpdate, conn=Depends(get_db), user=Depen
     set_clause = ", ".join(f"{k}=%s" for k in fields)
     values = list(fields.values()) + [task_id]
     cur_u = execute(conn, f"UPDATE department_tasks SET {set_clause} WHERE id=%s RETURNING *", values)
-    return dict(cur_u.fetchone())
+    updated_task = dict(cur_u.fetchone())
+
+    if "status" in fields and fields["status"] != task["status"]:
+        status_label = "completed" if fields["status"] == "completed" else "in progress" if fields["status"] == "in_progress" else "pending"
+        log_activity(conn, task["event_id"], user["id"], ACTION_TASK_UPDATED, f"{user['name']} marked task '{task['title']}' as {status_label}")
+
+    return updated_task
 
 @router.delete("/{task_id}")
 def delete_task(task_id: int, conn=Depends(get_db), user=Depends(get_current_user)):
@@ -138,8 +182,8 @@ def delete_task(task_id: int, conn=Depends(get_db), user=Depends(get_current_use
         raise HTTPException(status_code=404, detail="Task not found")
 
     role_ctx = get_event_role(conn, user, task["event_id"])
-    if not can_edit_department(role_ctx, task["department_id"]):
-        raise HTTPException(status_code=403, detail="You cannot delete this task")
+    if not is_admin_or_cohead(user, role_ctx):
+        raise HTTPException(status_code=403, detail="Only Super Admin, Event Head, or Co-Head can delete work tasks")
 
     execute(conn, "DELETE FROM department_tasks WHERE id=%s", (task_id,))
     return {"ok": True}
