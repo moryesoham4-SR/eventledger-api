@@ -79,35 +79,33 @@ def send_reset_email(to_email: str, code: str):
     except Exception as e2:
         print(f"TLS:587 email send failed: {e2}")
 
-def normalize_email(email_str: str) -> str:
+import re
+
+EMAIL_REGEX = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
+
+def validate_and_clean_email(email_str: str) -> str:
     if not email_str:
-        return ""
-    e = email_str.lower().strip().replace(" ", "")
-    if "gmail.com" in e and "@" not in e:
-        e = e.replace("gmail.com", "@gmail.com")
-    elif "yahoo.com" in e and "@" not in e:
-        e = e.replace("yahoo.com", "@yahoo.com")
-    elif "outlook.com" in e and "@" not in e:
-        e = e.replace("outlook.com", "@outlook.com")
-    elif "@" not in e and "." not in e:
-        e = f"{e}@gmail.com"
-    return e
+        raise HTTPException(status_code=400, detail="Email address is required")
+    cleaned = email_str.lower().strip()
+    if not EMAIL_REGEX.match(cleaned):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid email format. Please enter a complete email address with '@' and domain (e.g. name@gmail.com)"
+        )
+    return cleaned
 
 @router.post("/forgot-password")
 def forgot_password(data: ForgotPasswordRequest, conn=Depends(get_db)):
-    email = normalize_email(data.email)
+    email = validate_and_clean_email(data.email)
     run_safely(conn, lambda: execute(conn, "ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_code VARCHAR(20)"))
 
     cur = execute(conn, "SELECT id, name FROM users WHERE email=%s", (email,))
     user = cur.fetchone()
     if not user:
-        random_password = hash_password(f"user_{email}_secret")
-        cur = execute(
-            conn,
-            "INSERT INTO users (name, email, password, role, is_super_admin, org_name) VALUES (%s, %s, %s, %s, %s, %s) RETURNING *",
-            (email.split("@")[0].capitalize(), email, random_password, "event_admin", 0, "User Workspace")
+        raise HTTPException(
+            status_code=404,
+            detail=f"No account found for '{email}'. Please check your spelling or register first."
         )
-        user = cur.fetchone()
 
     import random
     code = f"{random.randint(100000, 999999)}"
@@ -126,7 +124,7 @@ def forgot_password(data: ForgotPasswordRequest, conn=Depends(get_db)):
 
 @router.post("/reset-password-confirm")
 def reset_password_confirm(data: ResetPasswordConfirmRequest, conn=Depends(get_db)):
-    email = normalize_email(data.email)
+    email = validate_and_clean_email(data.email)
     run_safely(conn, lambda: execute(conn, "ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_code VARCHAR(20)"))
 
     cur = execute(conn, "SELECT id, reset_code FROM users WHERE email=%s", (email,))
@@ -142,7 +140,7 @@ def reset_password_confirm(data: ResetPasswordConfirmRequest, conn=Depends(get_d
 
 @router.post("/login")
 def login(data: LoginRequest, conn=Depends(get_db)):
-    email = normalize_email(data.email)
+    email = validate_and_clean_email(data.email)
     cur = execute(conn, "SELECT * FROM users WHERE email=%s AND is_active=1", (email,))
     user = cur.fetchone()
     if not user or not verify_password(data.password, user["password"]):
@@ -206,7 +204,7 @@ def google_login(data: GoogleLoginRequest, conn=Depends(get_db)):
     if not email:
         raise HTTPException(status_code=400, detail="Invalid Google authentication token")
 
-    email = normalize_email(email)
+    email = validate_and_clean_email(email)
     cur = execute(conn, "SELECT * FROM users WHERE email=%s", (email,))
     user = cur.fetchone()
     
@@ -237,7 +235,7 @@ def google_login(data: GoogleLoginRequest, conn=Depends(get_db)):
 
 @router.post("/register")
 def register(data: RegisterRequest, conn=Depends(get_db)):
-    reg_email = normalize_email(data.email)
+    reg_email = validate_and_clean_email(data.email)
     cur = execute(conn, "SELECT id FROM users WHERE email=%s", (reg_email,))
     if cur.fetchone():
         raise HTTPException(status_code=400, detail="Email already registered")

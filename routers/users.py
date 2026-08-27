@@ -148,6 +148,21 @@ def send_invite_email(to_email: str, inviter_name: str, role_title: str, event_n
         except Exception:
             pass
 
+import re
+
+EMAIL_REGEX = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
+
+def validate_and_clean_email(email_str: str) -> str:
+    if not email_str:
+        raise HTTPException(status_code=400, detail="Email address is required")
+    cleaned = email_str.lower().strip()
+    if not EMAIL_REGEX.match(cleaned):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid email format. Please enter a complete email address with '@' and domain (e.g. name@gmail.com)"
+        )
+    return cleaned
+
 @router.get("/event-team/{event_id}")
 def get_event_team(event_id: int, conn=Depends(get_db), user=Depends(get_current_user)):
     cur = execute(conn, """
@@ -165,7 +180,7 @@ def invite_member(data: InviteMemberRequest, conn=Depends(get_db), user=Depends(
     if not is_event_owner_or_super_admin(conn, user, data.event_id):
         raise HTTPException(status_code=403, detail="Only event admins can invite team members")
     
-    target_email = data.email.lower().strip()
+    target_email = validate_and_clean_email(data.email)
     cur = execute(conn, "SELECT * FROM users WHERE email=%s", (target_email,))
     target_user = cur.fetchone()
     
