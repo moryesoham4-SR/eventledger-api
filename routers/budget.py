@@ -82,6 +82,8 @@ def get_proposals(event_id: int, conn=Depends(get_db), user=Depends(get_current_
         raise HTTPException(status_code=403, detail="You don't have access to this event")
 
     if role_ctx["level"] in ("dept_head", "volunteer"):
+        if not role_ctx["dept_id"]:
+            return []
         cur = execute(conn,
             """SELECT p.*, d.name as dept_name, u.name as submitted_by_name
                FROM budget_proposals p
