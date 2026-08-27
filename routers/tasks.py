@@ -132,19 +132,21 @@ def create_task(data: TaskCreate, conn=Depends(get_db), user=Depends(get_current
     task = dict(cur.fetchone())
 
     # 1. Log to recent activity
+    actor_name = user.get("name") or user.get("email") or "Admin"
     assignee_label = data.assigned_to_name or "team member"
-    log_activity(conn, data.event_id, user["id"], ACTION_TASK_ASSIGNED, f"{user['name']} assigned work '{data.title}' to {assignee_label}")
+    log_activity(conn, data.event_id, user["id"], ACTION_TASK_ASSIGNED, f"{actor_name} assigned work '{data.title}' to {assignee_label}")
 
     # 2. Dispatch persistent unread notification for target user (will show badge even when logging in later)
     if target_user_id:
         cur_e = execute(conn, "SELECT name FROM events WHERE id=%s", (data.event_id,))
         ev_row = cur_e.fetchone()
         ev_name = ev_row["name"] if ev_row else "Event"
-        msg = f"📋 WORK ASSIGNED: '{data.title}' (Deadline: {data.deadline or 'TBD'}) for event '{ev_name}'."
+        title_str = "📋 Task Assigned"
+        msg = f"WORK ASSIGNED: '{data.title}' (Deadline: {data.deadline or 'TBD'}) for event '{ev_name}'."
         run_safely(conn, lambda: execute(conn, """
-            INSERT INTO notifications (user_id, message, priority, category, event_id, action_url, is_read)
-            VALUES (%s, %s, %s, %s, %s, %s, 0)
-        """, (target_user_id, msg, "info", "task", data.event_id, "/calendar")))
+            INSERT INTO notifications (user_id, title, message, priority, category, event_id, action_url, is_read)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, 0)
+        """, (target_user_id, title_str, msg, "info", "task", data.event_id, "/calendar")))
 
     return task
 
@@ -176,16 +178,18 @@ def update_task(task_id: int, data: TaskUpdate, conn=Depends(get_db), user=Depen
     updated_task = dict(cur_u.fetchone())
 
     if "status" in fields and fields["status"] != task["status"]:
+        actor_name = user.get("name") or user.get("email") or "User"
         status_label = "completed" if fields["status"] == "completed" else "in progress" if fields["status"] == "in_progress" else "pending"
-        log_activity(conn, task["event_id"], user["id"], ACTION_TASK_UPDATED, f"{user['name']} marked task '{task['title']}' as {status_label}")
+        log_activity(conn, task["event_id"], user["id"], ACTION_TASK_UPDATED, f"{actor_name} marked task '{task['title']}' as {status_label}")
 
         # If updated by admin, notify the assigned user
         if task.get("assigned_to_user_id") and task["assigned_to_user_id"] != user["id"]:
-            msg = f"🎯 TASK UPDATE: Task '{task['title']}' was marked as {status_label} by {user['name']}."
+            title_str = "🎯 Task Updated"
+            msg = f"TASK UPDATE: Task '{task['title']}' was marked as {status_label} by {actor_name}."
             run_safely(conn, lambda: execute(conn, """
-                INSERT INTO notifications (user_id, message, priority, category, event_id, action_url, is_read)
-                VALUES (%s, %s, %s, %s, %s, %s, 0)
-            """, (task["assigned_to_user_id"], msg, "info", "task", task["event_id"], "/calendar")))
+                INSERT INTO notifications (user_id, title, message, priority, category, event_id, action_url, is_read)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, 0)
+            """, (task["assigned_to_user_id"], title_str, msg, "info", "task", task["event_id"], "/calendar")))
 
     return updated_task
 

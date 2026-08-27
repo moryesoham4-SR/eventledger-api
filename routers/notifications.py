@@ -6,6 +6,8 @@ from utils.db_safety import run_safely
 router = APIRouter(prefix="/api/notifications", tags=["notifications"])
 
 def ensure_notifications_schema(conn):
+    run_safely(conn, lambda: execute(conn, "ALTER TABLE notifications ADD COLUMN IF NOT EXISTS title VARCHAR(255) DEFAULT 'Notification'"))
+    run_safely(conn, lambda: execute(conn, "ALTER TABLE notifications ALTER COLUMN title DROP NOT NULL"))
     run_safely(conn, lambda: execute(conn, "ALTER TABLE notifications ADD COLUMN IF NOT EXISTS priority VARCHAR(20) DEFAULT 'info'"))
     run_safely(conn, lambda: execute(conn, "ALTER TABLE notifications ADD COLUMN IF NOT EXISTS category VARCHAR(30) DEFAULT 'general'"))
     run_safely(conn, lambda: execute(conn, "ALTER TABLE notifications ADD COLUMN IF NOT EXISTS event_id INT"))
@@ -62,22 +64,24 @@ def generate_alerts(event_id: int, conn=Depends(get_db), user=Depends(get_curren
             if allocated > 0:
                 pct = (spent / allocated) * 100
                 if pct >= 100:
-                    msg = f"🚨 CRITICAL OVERRUN: Department '{dept['name']}' has exceeded its budget ({pct:.1f}% spent - ₹{spent:,.2f} / ₹{allocated:,.2f})!"
+                    title = "🚨 Budget Overrun Alert"
+                    msg = f"CRITICAL OVERRUN: Department '{dept['name']}' has exceeded its budget ({pct:.1f}% spent - ₹{spent:,.2f} / ₹{allocated:,.2f})!"
                     check = execute(conn, "SELECT id FROM notifications WHERE user_id=%s AND message=%s AND is_read=0", (user_id, msg))
                     if not check.fetchone():
                         execute(conn, """
-                            INSERT INTO notifications (user_id, message, priority, category, event_id, action_url)
-                            VALUES (%s, %s, %s, %s, %s, %s)
-                        """, (user_id, msg, "critical", "overrun", event_id, "/budget"))
+                            INSERT INTO notifications (user_id, title, message, priority, category, event_id, action_url, is_read)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, 0)
+                        """, (user_id, title, msg, "critical", "overrun", event_id, "/budget"))
                         new_alerts_count += 1
                 elif pct >= 85:
-                    msg = f"⚠️ BUDGET WARNING: Department '{dept['name']}' is approaching budget limit ({pct:.1f}% spent - ₹{spent:,.2f} / ₹{allocated:,.2f})."
+                    title = "⚠️ Budget Warning Alert"
+                    msg = f"BUDGET WARNING: Department '{dept['name']}' is approaching budget limit ({pct:.1f}% spent - ₹{spent:,.2f} / ₹{allocated:,.2f})."
                     check = execute(conn, "SELECT id FROM notifications WHERE user_id=%s AND message=%s AND is_read=0", (user_id, msg))
                     if not check.fetchone():
                         execute(conn, """
-                            INSERT INTO notifications (user_id, message, priority, category, event_id, action_url)
-                            VALUES (%s, %s, %s, %s, %s, %s)
-                        """, (user_id, msg, "warning", "overrun", event_id, "/budget"))
+                            INSERT INTO notifications (user_id, title, message, priority, category, event_id, action_url, is_read)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, 0)
+                        """, (user_id, title, msg, "warning", "overrun", event_id, "/budget"))
                         new_alerts_count += 1
     except Exception as err:
         conn.rollback()
@@ -93,13 +97,14 @@ def generate_alerts(event_id: int, conn=Depends(get_db), user=Depends(get_curren
         vendors = cur_v.fetchall()
 
         for v in vendors:
-            msg = f"⏰ VENDOR PAYMENT DUE: Vendor '{v['name']}' payout of ₹{float(v['contract_value'] or 0):,.2f} is pending."
+            title = "⏰ Vendor Payout Pending"
+            msg = f"VENDOR PAYMENT DUE: Vendor '{v['name']}' payout of ₹{float(v['contract_value'] or 0):,.2f} is pending."
             check = execute(conn, "SELECT id FROM notifications WHERE user_id=%s AND message=%s AND is_read=0", (user_id, msg))
             if not check.fetchone():
                 execute(conn, """
-                    INSERT INTO notifications (user_id, message, priority, category, event_id, action_url)
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                """, (user_id, msg, "warning", "deadline", event_id, "/vendors"))
+                    INSERT INTO notifications (user_id, title, message, priority, category, event_id, action_url, is_read)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, 0)
+                """, (user_id, title, msg, "warning", "deadline", event_id, "/vendors"))
                 new_alerts_count += 1
     except Exception as err:
         conn.rollback()
@@ -115,13 +120,14 @@ def generate_alerts(event_id: int, conn=Depends(get_db), user=Depends(get_curren
         high_expenses = cur_e.fetchall()
 
         for exp in high_expenses:
-            msg = f"💸 UNAPPROVED BUDGET: High-value proposal '{exp['title']}' (₹{float(exp['amount']):,.2f}) requires approval."
+            title = "💸 High-Value Budget Proposal"
+            msg = f"UNAPPROVED BUDGET: High-value proposal '{exp['title']}' (₹{float(exp['amount']):,.2f}) requires approval."
             check = execute(conn, "SELECT id FROM notifications WHERE user_id=%s AND message=%s AND is_read=0", (user_id, msg))
             if not check.fetchone():
                 execute(conn, """
-                    INSERT INTO notifications (user_id, message, priority, category, event_id, action_url)
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                """, (user_id, msg, "info", "expense", event_id, "/budget"))
+                    INSERT INTO notifications (user_id, title, message, priority, category, event_id, action_url, is_read)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, 0)
+                """, (user_id, title, msg, "info", "expense", event_id, "/budget"))
                 new_alerts_count += 1
     except Exception as err:
         conn.rollback()
