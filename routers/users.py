@@ -92,9 +92,66 @@ class RoleAssign(BaseModel):
     role: str
     dept_id: Optional[int] = None
 
+class InviteMemberRequest(BaseModel):
+    email: str
+    name: Optional[str] = None
+    role: str
+    dept_id: Optional[int] = None
+    event_id: int
+
 class PasswordReset(BaseModel):
     user_id: int
     new_password: str
+
+@router.get("/event-team/{event_id}")
+def get_event_team(event_id: int, conn=Depends(get_db), user=Depends(get_current_user)):
+    cur = execute(conn, """
+        SELECT u.id, u.name, u.email, u.avatar_color, r.role, r.dept_id, d.name as dept_name
+        FROM user_event_roles r
+        JOIN users u ON u.id = r.user_id
+        LEFT JOIN departments d ON d.id = r.dept_id
+        WHERE r.event_id = %s
+        ORDER BY u.name
+    """, (event_id,))
+    return [dict(row) for row in cur.fetchall()]
+
+@router.post("/invite-member")
+def invite_member(data: InviteMemberRequest, conn=Depends(get_db), user=Depends(get_current_user)):
+    if not is_event_owner_or_super_admin(conn, user, data.event_id):
+        raise HTTPException(status_code=403, detail="Only event admins can invite team members")
+    
+    target_email = data.email.lower().strip()
+    cur = execute(conn, "SELECT * FROM users WHERE email=%s", (target_email,))
+    target_user = cur.fetchone()
+    
+    if not target_user:
+        name_str = data.name.strip() if data.name else target_email.split("@")[0].capitalize()
+        random_pwd = hash_password(f"invite_{target_email}_secret")
+        cur = execute(
+            conn,
+            "INSERT INTO users (name, email, password, role, is_super_admin, org_name) VALUES (%s, %s, %s, %s, %s, %s) RETURNING *",
+            (name_str, target_email, random_pwd, "event_admin", 0, user.get("org_name") or "Event Team")
+        )
+        target_user = cur.fetchone()
+    
+    target_id = target_user["id"]
+
+    run_safely(conn, lambda: execute(conn, """
+        INSERT INTO user_event_roles (user_id, event_id, role, dept_id, assigned_by)
+        VALUES (%s, %s, %s, %s, %s)
+    """, (target_id, data.event_id, data.role, data.dept_id, user["id"])))
+
+    cur_e = execute(conn, "SELECT name FROM events WHERE id=%s", (data.event_id,))
+    ev_row = cur_e.fetchone()
+    ev_name = ev_row["name"] if ev_row else "Event"
+
+    notif_msg = f"🎉 TEAM INVITE: You've been invited as '{data.role.replace('_', ' ').title()}' for '{ev_name}' by {user['name']}!"
+    run_safely(conn, lambda: execute(conn, """
+        INSERT INTO notifications (user_id, message, priority, category, event_id, action_url)
+        VALUES (%s, %s, %s, %s, %s, %s)
+    """, (target_id, notif_msg, "info", "general", data.event_id, "/dashboard")))
+
+    return {"ok": True, "message": f"Successfully invited {target_email} to team!"}
 
 @router.get("/")
 def get_users(conn=Depends(get_db), user=Depends(get_current_user)):
@@ -131,8 +188,7 @@ def assign_role(data: RoleAssign, conn=Depends(get_db), user=Depends(get_current
 
     execute(conn,
         """INSERT INTO user_event_roles (user_id,event_id,role,dept_id,assigned_by)
-           VALUES (%s,%s,%s,%s,%s)
-           ON CONFLICT (user_id,event_id,role,dept_id) DO NOTHING""",
+           VALUES (%s,%s,%s,%s,%s)""",
         (data.user_id, data.event_id, data.role, data.dept_id, user["id"])
     )
     return {"ok": True}
