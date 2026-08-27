@@ -4,7 +4,6 @@ from typing import Optional
 from core.database import get_db, execute
 from core.auth import get_current_user, hash_password, verify_password
 from utils.roles import get_event_role, is_event_owner_or_super_admin
-from utils.db_safety import run_safely
 
 router = APIRouter(prefix="/api/users", tags=["users"])
 
@@ -78,11 +77,13 @@ def my_role(event_id: int, conn=Depends(get_db), user=Depends(get_current_user))
     show/hide actions (approve, delete department, etc.) accordingly."""
     role_ctx = get_event_role(conn, user, event_id)
     can_inv = role_ctx["level"] in ("event_admin", "co_host") or bool(user.get("is_super_admin"))
+    can_work = role_ctx["level"] == "event_admin" or bool(user.get("is_super_admin"))
     return {
         "level": role_ctx["level"],
         "dept_id": role_ctx["dept_id"],
         "can_manage_departments": role_ctx["level"] == "event_admin",
         "can_manage_invites": can_inv,
+        "can_manage_work_tasks": can_work,
         "can_approve_budget": role_ctx["level"] in ("event_admin", "co_host", "finance_head"),
         "is_super_admin": bool(user.get("is_super_admin")),
     }
