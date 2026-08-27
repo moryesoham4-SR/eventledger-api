@@ -103,6 +103,51 @@ class PasswordReset(BaseModel):
     user_id: int
     new_password: str
 
+def send_invite_email(to_email: str, inviter_name: str, role_title: str, event_name: str):
+    import os, smtplib
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+
+    sender_email = os.getenv("SMTP_EMAIL", "moryesoham4@gmail.com").strip()
+    sender_password = os.getenv("SMTP_PASSWORD", "nbpcyvdiqbnbyvwj").replace(" ", "").strip()
+
+    if not sender_email or not sender_password:
+        return
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = f"🎉 You've been invited to '{event_name}' on EventLedger AI"
+    msg["From"] = f"EventLedger AI <{sender_email}>"
+    msg["To"] = to_email
+
+    html = f"""
+    <div style="font-family: Arial, sans-serif; padding: 24px; background-color: #0F172A; color: #F8FAFC; border-radius: 12px; max-width: 500px;">
+      <h2 style="color: #FF7A00; margin-top: 0;">EventLedger AI — Team Invitation</h2>
+      <p style="font-size: 15px;"><strong>{inviter_name}</strong> invited you to collaborate as <strong>{role_title}</strong> for the event: <strong>{event_name}</strong>.</p>
+      
+      <div style="background-color: #1E293B; padding: 16px; border-radius: 8px; margin: 20px 0;">
+        <h4 style="color: #10B981; margin-top: 0; margin-bottom: 8px;">🚀 How to Log In (Choose Either):</h4>
+        <p style="margin: 4px 0; font-size: 13px;"><strong>Option 1:</strong> Click <strong>"Sign in with Google"</strong> using this email ({to_email}) for instant 1-click access.</p>
+        <p style="margin: 4px 0; font-size: 13px;"><strong>Option 2:</strong> Click <strong>"Forgot Password?"</strong> on the login page to set your own password using the instant verification code.</p>
+      </div>
+
+      <a href="https://eventledger-web.vercel.app/login" style="display: inline-block; background-color: #2563EB; color: #ffffff; padding: 12px 24px; text-decoration: none; border-radius: 8px; font-weight: bold; font-size: 14px;">Open EventLedger AI →</a>
+    </div>
+    """
+    msg.attach(MIMEText(html, "html"))
+
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=10) as server:
+            server.login(sender_email, sender_password)
+            server.sendmail(sender_email, to_email, msg.as_string())
+    except Exception:
+        try:
+            with smtplib.SMTP("smtp.gmail.com", 587, timeout=10) as server:
+                server.starttls()
+                server.login(sender_email, sender_password)
+                server.sendmail(sender_email, to_email, msg.as_string())
+        except Exception:
+            pass
+
 @router.get("/event-team/{event_id}")
 def get_event_team(event_id: int, conn=Depends(get_db), user=Depends(get_current_user)):
     cur = execute(conn, """
@@ -144,12 +189,19 @@ def invite_member(data: InviteMemberRequest, conn=Depends(get_db), user=Depends(
     cur_e = execute(conn, "SELECT name FROM events WHERE id=%s", (data.event_id,))
     ev_row = cur_e.fetchone()
     ev_name = ev_row["name"] if ev_row else "Event"
+    role_title = data.role.replace("_", " ").title()
 
-    notif_msg = f"🎉 TEAM INVITE: You've been invited as '{data.role.replace('_', ' ').title()}' for '{ev_name}' by {user['name']}!"
+    notif_msg = f"🎉 TEAM INVITE: You've been invited as '{role_title}' for '{ev_name}' by {user['name']}!"
     run_safely(conn, lambda: execute(conn, """
         INSERT INTO notifications (user_id, message, priority, category, event_id, action_url)
         VALUES (%s, %s, %s, %s, %s, %s)
     """, (target_id, notif_msg, "info", "general", data.event_id, "/dashboard")))
+
+    # Dispatch email invitation
+    try:
+        send_invite_email(target_email, user.get("name") or "Event Admin", role_title, ev_name)
+    except Exception as err:
+        print(f"Error sending invite email: {err}")
 
     return {"ok": True, "message": f"Successfully invited {target_email} to team!"}
 
