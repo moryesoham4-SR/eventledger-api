@@ -79,9 +79,23 @@ def send_reset_email(to_email: str, code: str):
     except Exception as e2:
         print(f"TLS:587 email send failed: {e2}")
 
+def normalize_email(email_str: str) -> str:
+    if not email_str:
+        return ""
+    e = email_str.lower().strip().replace(" ", "")
+    if "gmail.com" in e and "@" not in e:
+        e = e.replace("gmail.com", "@gmail.com")
+    elif "yahoo.com" in e and "@" not in e:
+        e = e.replace("yahoo.com", "@yahoo.com")
+    elif "outlook.com" in e and "@" not in e:
+        e = e.replace("outlook.com", "@outlook.com")
+    elif "@" not in e and "." not in e:
+        e = f"{e}@gmail.com"
+    return e
+
 @router.post("/forgot-password")
 def forgot_password(data: ForgotPasswordRequest, conn=Depends(get_db)):
-    email = data.email.lower().strip()
+    email = normalize_email(data.email)
     run_safely(conn, lambda: execute(conn, "ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_code VARCHAR(20)"))
 
     cur = execute(conn, "SELECT id, name FROM users WHERE email=%s", (email,))
@@ -112,7 +126,7 @@ def forgot_password(data: ForgotPasswordRequest, conn=Depends(get_db)):
 
 @router.post("/reset-password-confirm")
 def reset_password_confirm(data: ResetPasswordConfirmRequest, conn=Depends(get_db)):
-    email = data.email.lower().strip()
+    email = normalize_email(data.email)
     run_safely(conn, lambda: execute(conn, "ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_code VARCHAR(20)"))
 
     cur = execute(conn, "SELECT id, reset_code FROM users WHERE email=%s", (email,))
@@ -128,7 +142,8 @@ def reset_password_confirm(data: ResetPasswordConfirmRequest, conn=Depends(get_d
 
 @router.post("/login")
 def login(data: LoginRequest, conn=Depends(get_db)):
-    cur = execute(conn, "SELECT * FROM users WHERE email=%s AND is_active=1", (data.email.lower(),))
+    email = normalize_email(data.email)
+    cur = execute(conn, "SELECT * FROM users WHERE email=%s AND is_active=1", (email,))
     user = cur.fetchone()
     if not user or not verify_password(data.password, user["password"]):
         raise HTTPException(status_code=401, detail="Invalid email or password")
@@ -191,7 +206,7 @@ def google_login(data: GoogleLoginRequest, conn=Depends(get_db)):
     if not email:
         raise HTTPException(status_code=400, detail="Invalid Google authentication token")
 
-    email = email.lower()
+    email = normalize_email(email)
     cur = execute(conn, "SELECT * FROM users WHERE email=%s", (email,))
     user = cur.fetchone()
     
@@ -222,12 +237,13 @@ def google_login(data: GoogleLoginRequest, conn=Depends(get_db)):
 
 @router.post("/register")
 def register(data: RegisterRequest, conn=Depends(get_db)):
-    cur = execute(conn, "SELECT id FROM users WHERE email=%s", (data.email.lower(),))
+    reg_email = normalize_email(data.email)
+    cur = execute(conn, "SELECT id FROM users WHERE email=%s", (reg_email,))
     if cur.fetchone():
         raise HTTPException(status_code=400, detail="Email already registered")
     cur = execute(conn,
         "INSERT INTO users (name,email,password,role,is_super_admin,org_name) VALUES (%s,%s,%s,%s,%s,%s) RETURNING id",
-        (data.name, data.email.lower(), hash_password(data.password), "event_admin", 0, data.org_name)
+        (data.name, reg_email, hash_password(data.password), "event_admin", 0, data.org_name)
     )
     user_id = cur.fetchone()["id"]
     token = create_access_token({"sub": str(user_id)})
