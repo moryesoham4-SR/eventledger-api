@@ -158,30 +158,35 @@ def login(data: LoginRequest, conn=Depends(get_db)):
 
 @router.post("/google")
 def google_login(data: GoogleLoginRequest, conn=Depends(get_db)):
-    import urllib.request
-    import json
+    import json, base64
     
     email = None
     name = None
     
+    # 1. Instant local Base64URL JWT decoding (0ms latency!)
     try:
-        url = f"https://oauth2.googleapis.com/tokeninfo?id_token={data.id_token}"
-        req = urllib.request.Request(url)
-        with urllib.request.urlopen(req, timeout=5) as response:
-            token_data = json.loads(response.read().decode('utf-8'))
-            email = token_data.get("email")
-            name = token_data.get("name") or token_data.get("given_name") or (email.split("@")[0] if email else "Google User")
-    except Exception:
+        parts = data.id_token.split(".")
+        if len(parts) >= 2:
+            padded = parts[1] + "=" * (-len(parts[1]) % 4)
+            cleaned = padded.replace("-", "+").replace("_", "/")
+            payload = json.loads(base64.b64decode(cleaned).decode('utf-8'))
+            email = payload.get("email")
+            name = payload.get("name") or payload.get("given_name") or (email.split("@")[0] if email else "Google User")
+    except Exception as e:
+        print(f"Local JWT decode warning: {e}")
+
+    # 2. Fallback to Google HTTP tokeninfo if local decoding did not extract email
+    if not email:
         try:
-            import base64
-            parts = data.id_token.split(".")
-            if len(parts) >= 2:
-                padded = parts[1] + "=" * (-len(parts[1]) % 4)
-                payload = json.loads(base64.b64decode(padded).decode('utf-8'))
-                email = payload.get("email")
-                name = payload.get("name") or (email.split("@")[0] if email else "Google User")
-        except Exception:
-            pass
+            import urllib.request
+            url = f"https://oauth2.googleapis.com/tokeninfo?id_token={data.id_token}"
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req, timeout=3) as response:
+                token_data = json.loads(response.read().decode('utf-8'))
+                email = token_data.get("email")
+                name = token_data.get("name") or token_data.get("given_name") or (email.split("@")[0] if email else "Google User")
+        except Exception as e:
+            print(f"Google tokeninfo error: {e}")
 
     if not email:
         raise HTTPException(status_code=400, detail="Invalid Google authentication token")
