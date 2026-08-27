@@ -75,14 +75,15 @@ def change_my_password(data: ChangePassword, conn=Depends(get_db), user=Depends(
 @router.get("/my-role")
 def my_role(event_id: int, conn=Depends(get_db), user=Depends(get_current_user)):
     """Tells the frontend what this user can do on a given event, so it can
-    show/hide actions (approve, delete department, etc.) accordingly.
-    The backend enforces these independently — this is for UI convenience only."""
+    show/hide actions (approve, delete department, etc.) accordingly."""
     role_ctx = get_event_role(conn, user, event_id)
+    can_inv = role_ctx["level"] in ("event_admin", "co_host") or bool(user.get("is_super_admin"))
     return {
-        "level": role_ctx["level"],  # "event_admin" | "finance_head" | "dept_head" | "volunteer" | None
+        "level": role_ctx["level"],
         "dept_id": role_ctx["dept_id"],
         "can_manage_departments": role_ctx["level"] == "event_admin",
-        "can_approve_budget": role_ctx["level"] in ("event_admin", "finance_head"),
+        "can_manage_invites": can_inv,
+        "can_approve_budget": role_ctx["level"] in ("event_admin", "co_host", "finance_head"),
         "is_super_admin": bool(user.get("is_super_admin")),
     }
 
@@ -177,8 +178,9 @@ def get_event_team(event_id: int, conn=Depends(get_db), user=Depends(get_current
 
 @router.post("/invite-member")
 def invite_member(data: InviteMemberRequest, conn=Depends(get_db), user=Depends(get_current_user)):
-    if not is_event_owner_or_super_admin(conn, user, data.event_id):
-        raise HTTPException(status_code=403, detail="Only event admins can invite team members")
+    role_ctx = get_event_role(conn, user, data.event_id)
+    if not (role_ctx["level"] in ("event_admin", "co_host") or is_event_owner_or_super_admin(conn, user, data.event_id)):
+        raise HTTPException(status_code=403, detail="Only Event Head and Co-Head can invite team members")
     
     target_email = validate_and_clean_email(data.email)
     cur = execute(conn, "SELECT * FROM users WHERE email=%s", (target_email,))
