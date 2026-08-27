@@ -48,16 +48,16 @@ def generate_alerts(event_id: int, conn=Depends(get_db), user=Depends(get_curren
     # 1. Department Budget Overruns
     try:
         cur = execute(conn, """
-            SELECT d.id, d.name, d.allocated_budget, COALESCE(SUM(e.amount), 0) as spent
+            SELECT d.id, d.name,
+                   COALESCE((SELECT SUM(total_amount) FROM budget_proposals WHERE department_id = d.id AND status = 'approved'), 0) as allocated,
+                   COALESCE((SELECT SUM(amount) FROM actual_expenses WHERE department_id = d.id AND status != 'rejected'), 0) as spent
             FROM departments d
-            LEFT JOIN expenses e ON e.dept_id = d.id AND e.status != 'rejected'
             WHERE d.event_id = %s
-            GROUP BY d.id, d.name, d.allocated_budget
         """, (event_id,))
         depts = cur.fetchall()
 
         for dept in depts:
-            allocated = float(dept["allocated_budget"] or 0)
+            allocated = float(dept["allocated"] or 0)
             spent = float(dept["spent"] or 0)
             if allocated > 0:
                 pct = (spent / allocated) * 100
@@ -80,19 +80,20 @@ def generate_alerts(event_id: int, conn=Depends(get_db), user=Depends(get_curren
                         """, (user_id, msg, "warning", "overrun", event_id, "/budget"))
                         new_alerts_count += 1
     except Exception as err:
+        conn.rollback()
         print(f"Error checking budget overruns: {err}")
 
     # 2. Vendor Payment Deadlines
     try:
         cur_v = execute(conn, """
-            SELECT id, name, total_contract_value, status
+            SELECT id, name, contract_value, status
             FROM vendors
             WHERE event_id = %s AND status = 'pending'
         """, (event_id,))
         vendors = cur_v.fetchall()
 
         for v in vendors:
-            msg = f"⏰ VENDOR PAYMENT DUE: Vendor '{v['name']}' payout of ₹{float(v['total_contract_value'] or 0):,.2f} is pending."
+            msg = f"⏰ VENDOR PAYMENT DUE: Vendor '{v['name']}' payout of ₹{float(v['contract_value'] or 0):,.2f} is pending."
             check = execute(conn, "SELECT id FROM notifications WHERE user_id=%s AND message=%s AND is_read=0", (user_id, msg))
             if not check.fetchone():
                 execute(conn, """
@@ -101,27 +102,29 @@ def generate_alerts(event_id: int, conn=Depends(get_db), user=Depends(get_curren
                 """, (user_id, msg, "warning", "deadline", event_id, "/vendors"))
                 new_alerts_count += 1
     except Exception as err:
+        conn.rollback()
         print(f"Error checking vendor deadlines: {err}")
 
-    # 3. High-Value Unapproved Expenses
+    # 3. High-Value Unapproved Budget Proposals
     try:
         cur_e = execute(conn, """
-            SELECT id, title, amount
-            FROM expenses
-            WHERE event_id = %s AND status = 'pending' AND amount >= 10000
+            SELECT id, title, total_amount as amount
+            FROM budget_proposals
+            WHERE event_id = %s AND status = 'submitted' AND total_amount >= 10000
         """, (event_id,))
         high_expenses = cur_e.fetchall()
 
         for exp in high_expenses:
-            msg = f"💸 UNAPPROVED EXPENSE: High-value expense '{exp['title']}' (₹{float(exp['amount']):,.2f}) requires approval."
+            msg = f"💸 UNAPPROVED BUDGET: High-value proposal '{exp['title']}' (₹{float(exp['amount']):,.2f}) requires approval."
             check = execute(conn, "SELECT id FROM notifications WHERE user_id=%s AND message=%s AND is_read=0", (user_id, msg))
             if not check.fetchone():
                 execute(conn, """
                     INSERT INTO notifications (user_id, message, priority, category, event_id, action_url)
                     VALUES (%s, %s, %s, %s, %s, %s)
-                """, (user_id, msg, "info", "expense", event_id, "/expenses"))
+                """, (user_id, msg, "info", "expense", event_id, "/budget"))
                 new_alerts_count += 1
     except Exception as err:
-        print(f"Error checking high-value expenses: {err}")
+        conn.rollback()
+        print(f"Error checking high-value proposals: {err}")
 
     return {"ok": True, "new_alerts": new_alerts_count}
