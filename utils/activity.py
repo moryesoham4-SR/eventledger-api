@@ -18,6 +18,8 @@ ACTION_BUDGET_REJECTED = "budget_rejected"
 ACTION_EVENT_IMPORTED = "event_imported"
 ACTION_BUDGET_IMPORTED = "budget_imported"
 ACTION_EVENT_STATUS_CHANGED = "event_status_changed"
+ACTION_TASK_ASSIGNED = "task_assigned"
+ACTION_TASK_UPDATED = "task_updated"
 
 
 def log_activity(conn, event_id: int, user_id, action: str, description: str):
