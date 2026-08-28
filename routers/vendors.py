@@ -10,6 +10,7 @@ router = APIRouter(prefix="/api/vendors", tags=["vendors"])
 
 class VendorCreate(BaseModel):
     event_id: int
+    department_id: Optional[int] = None
     name: str
     category: str = "Other"
     contact_name: str = ""
@@ -39,6 +40,7 @@ class MilestoneUpdate(BaseModel):
 
 
 def ensure_vendor_milestones_schema(conn):
+    run_safely(conn, lambda: execute(conn, "ALTER TABLE vendors ADD COLUMN IF NOT EXISTS department_id INT;"))
     run_safely(conn, lambda: execute(conn, """
         CREATE TABLE IF NOT EXISTS vendor_payment_milestones (
             id SERIAL PRIMARY KEY,
@@ -73,27 +75,36 @@ def _require_finance(conn, user, event_id):
 
 @router.get("/")
 def get_vendors(event_id: int, conn=Depends(get_db), user=Depends(get_current_user)):
+    ensure_vendor_milestones_schema(conn)
     _require_event_access(conn, user, event_id)
-    cur = execute(conn, "SELECT * FROM vendors WHERE event_id=%s ORDER BY created_at DESC", (event_id,))
+    cur = execute(conn, """
+        SELECT v.*, d.name as dept_name, d.color as dept_color
+        FROM vendors v
+        LEFT JOIN departments d ON d.id = v.department_id
+        WHERE v.event_id = %s
+        ORDER BY v.created_at DESC
+    """, (event_id,))
     return [dict(r) for r in cur.fetchall()]
 
 @router.post("/")
 def add_vendor(data: VendorCreate, conn=Depends(get_db), user=Depends(get_current_user)):
+    ensure_vendor_milestones_schema(conn)
     _require_finance(conn, user, data.event_id)
     cur = execute(conn,
-        """INSERT INTO vendors (event_id,name,category,contact_name,contact_email,contract_value,status,notes)
-           VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *""",
-        (data.event_id, data.name, data.category, data.contact_name,
+        """INSERT INTO vendors (event_id,department_id,name,category,contact_name,contact_email,contract_value,status,notes)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *""",
+        (data.event_id, data.department_id, data.name, data.category, data.contact_name,
          data.contact_email, data.contract_value, data.status, data.notes)
     )
     vendor = dict(cur.fetchone())
 
+    # Wire vendor contract directly into actual_expenses tagged to the department!
     if data.contract_value:
         def _sync():
             execute(conn,
-                """INSERT INTO actual_expenses (event_id,category,item_name,description,quantity,unit,amount,payment_mode,status,reference,notes)
-                   VALUES (%s,'Vendor',%s,%s,1,'unit',%s,'Bank Transfer','paid',%s,%s)""",
-                (data.event_id, data.name, f"Vendor contract: {data.name}", data.contract_value,
+                """INSERT INTO actual_expenses (event_id,department_id,category,item_name,description,quantity,unit,amount,payment_mode,status,reference,notes)
+                   VALUES (%s,%s,'Vendor',%s,%s,1,'unit',%s,'Bank Transfer','paid',%s,%s)""",
+                (data.event_id, data.department_id, data.name, f"Vendor contract: {data.name}", data.contract_value,
                  f"vendor:{vendor['id']}", f"Auto-synced from vendor #{vendor['id']}")
             )
         run_safely(conn, _sync)
@@ -102,6 +113,7 @@ def add_vendor(data: VendorCreate, conn=Depends(get_db), user=Depends(get_curren
 
 @router.delete("/{vendor_id}")
 def delete_vendor(vendor_id: int, conn=Depends(get_db), user=Depends(get_current_user)):
+    ensure_vendor_milestones_schema(conn)
     cur = execute(conn, "SELECT event_id FROM vendors WHERE id=%s", (vendor_id,))
     vendor = cur.fetchone()
     if not vendor:
@@ -214,9 +226,10 @@ def get_event_milestones_schedule(event_id: int, conn=Depends(get_db), user=Depe
     _require_event_access(conn, user, event_id)
 
     cur = execute(conn, """
-        SELECT m.*, v.name as vendor_name, v.category as vendor_category
+        SELECT m.*, v.name as vendor_name, v.category as vendor_category, v.department_id, d.name as dept_name, d.color as dept_color
         FROM vendor_payment_milestones m
         JOIN vendors v ON v.id = m.vendor_id
+        LEFT JOIN departments d ON d.id = v.department_id
         WHERE m.event_id = %s
         ORDER BY CASE WHEN m.due_date = '' OR m.due_date IS NULL THEN '9999-99-99' ELSE m.due_date END ASC, m.id ASC
     """, (event_id,))
