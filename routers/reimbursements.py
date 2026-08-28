@@ -73,7 +73,6 @@ def get_reimbursements(event_id: int, conn=Depends(get_db), user=Depends(get_cur
     """
     params = [event_id]
 
-    # Scoped visibility: dept_head and volunteers see their own department claims
     if role_ctx["level"] in ("dept_head", "volunteer") and role_ctx["dept_id"]:
         query += " AND r.department_id = %s"
         params.append(role_ctx["dept_id"])
@@ -99,12 +98,24 @@ def submit_reimbursement(data: ClaimCreate, conn=Depends(get_db), user=Depends(g
     
     claim = dict(cur.fetchone())
 
-    # Send notification to event admins & dept head
-    notif_msg = f"📥 REIMBURSEMENT CLAIM: {user_name} submitted ₹{data.amount} for '{data.item_name}'"
-    run_safely(conn, lambda: execute(conn, """
-        INSERT INTO notifications (user_id, message, priority, category, event_id, action_url)
-        VALUES (%s, %s, 'info', 'general', %s, '/expenses')
-    """, (user["id"], notif_msg, data.event_id)))
+    # Get department title
+    cur_d = execute(conn, "SELECT name FROM departments WHERE id=%s", (data.department_id,))
+    d_row = cur_d.fetchone()
+    dept_title = d_row["name"] if d_row else "Department"
+
+    # Find Dept Head, Finance Head & Event Admins to notify
+    cur_heads = execute(conn, """
+        SELECT DISTINCT user_id FROM user_event_roles
+        WHERE event_id=%s AND (role IN ('event_admin', 'finance_head') OR (role='dept_head' AND dept_id=%s))
+    """, (data.event_id, data.department_id))
+    head_user_ids = [r["user_id"] for r in cur_heads.fetchall()]
+
+    notif_msg = f"📥 REIMBURSEMENT CLAIM: {user_name} submitted ₹{data.amount} for '{data.item_name}' in {dept_title}"
+    for hid in head_user_ids:
+        run_safely(conn, lambda h=hid: execute(conn, """
+            INSERT INTO notifications (user_id, message, priority, category, event_id, action_url)
+            VALUES (%s, %s, 'info', 'general', %s, '/expenses')
+        """, (h, notif_msg, data.event_id)))
 
     return claim
 
@@ -133,12 +144,26 @@ def dept_head_approve_claim(claim_id: int, data: DeptApprovalRequest, conn=Depen
     
     updated = dict(cur.fetchone())
 
+    # Notify Finance Heads & Event Admins when verified by Dept Head
+    cur_fin = execute(conn, """
+        SELECT DISTINCT user_id FROM user_event_roles
+        WHERE event_id=%s AND role IN ('event_admin', 'finance_head')
+    """, (claim["event_id"],))
+    fin_user_ids = [r["user_id"] for r in cur_fin.fetchall()]
+
+    fin_notif = f"🏢 DEPT HEAD VERIFIED: Claim ₹{claim['amount']} for '{claim['item_name']}' verified by Dept Head. Ready for Finance Payout!"
+    for fid in fin_user_ids:
+        run_safely(conn, lambda f=fid: execute(conn, """
+            INSERT INTO notifications (user_id, message, priority, category, event_id, action_url)
+            VALUES (%s, %s, 'info', 'general', %s, '/expenses')
+        """, (f, fin_notif, claim["event_id"])))
+
     # Notify claiming co-worker
-    notif_msg = f"🏢 DEPT HEAD REVIEW: Your claim for '{claim['item_name']}' was marked '{data.status.upper()}' by Dept Head"
+    coworker_notif = f"🏢 DEPT HEAD REVIEW: Your claim for '{claim['item_name']}' was marked '{data.status.upper()}' by Dept Head!"
     run_safely(conn, lambda: execute(conn, """
         INSERT INTO notifications (user_id, message, priority, category, event_id, action_url)
         VALUES (%s, %s, 'info', 'general', %s, '/expenses')
-    """, (claim["claimed_by_user_id"], notif_msg, claim["event_id"])))
+    """, (claim["claimed_by_user_id"], coworker_notif, claim["event_id"])))
 
     return updated
 
@@ -177,12 +202,11 @@ def finance_head_payout_claim(claim_id: int, data: FinancePayoutRequest, conn=De
               desc, claim["amount"], data.payment_mode, ref_tag, f"Paid out to {claim['claimed_by_name']}")))
 
     elif data.status != "paid_out":
-        # If toggled back from paid_out, remove from actual_expenses
         ref_tag = f"reimbursement:{claim_id}"
         run_safely(conn, lambda: execute(conn, "DELETE FROM actual_expenses WHERE reference=%s", (ref_tag,)))
 
-    # Notify claiming co-worker
-    notif_msg = f"💰 FINANCE PAYOUT: Your ₹{claim['amount']} claim for '{claim['item_name']}' was PAID OUT by Finance Head!"
+    # Notify claiming co-worker that money was paid out!
+    notif_msg = f"💰 FINANCE PAYOUT: Your ₹{claim['amount']} claim for '{claim['item_name']}' was APPROVED & PAID OUT via {data.payment_mode}!"
     run_safely(conn, lambda: execute(conn, """
         INSERT INTO notifications (user_id, message, priority, category, event_id, action_url)
         VALUES (%s, %s, 'info', 'general', %s, '/expenses')
