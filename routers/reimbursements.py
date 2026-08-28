@@ -132,7 +132,7 @@ def dept_head_approve_claim(claim_id: int, data: DeptApprovalRequest, conn=Depen
     if role_ctx["level"] not in ("event_admin", "finance_head", "dept_head"):
         raise HTTPException(status_code=403, detail="Only a Dept Head or Event Admin can verify department claims")
 
-    if role_ctx["level"] == "dept_head" and String(role_ctx["dept_id"]) != String(claim["department_id"]):
+    if role_ctx["level"] == "dept_head" and str(role_ctx["dept_id"]) != str(claim["department_id"]):
         raise HTTPException(status_code=403, detail="You can only verify claims for your own department")
 
     cur = execute(conn, """
