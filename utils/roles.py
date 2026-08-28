@@ -56,3 +56,44 @@ def get_event_role(conn, user: dict, event_id: int) -> dict:
 
     best = max(rows, key=lambda r: _ROLE_PRIORITY.get(r["role"], -1))
     return {"level": best["role"], "dept_id": best["dept_id"]}
+
+
+def is_event_owner_or_super_admin(conn, user: dict, event_id: int) -> bool:
+    """The only two parties allowed to delete an event outright: the person
+    who created it, or a true platform super admin (moderation power — this
+    doesn't expose any data the super admin couldn't already see via the
+    Users directory, it just allows removing abusive/erroneous events)."""
+    if user.get("is_super_admin"):
+        return True
+    cur = execute(conn, "SELECT user_id FROM events WHERE id=%s", (event_id,))
+    ev = cur.fetchone()
+    return bool(ev and ev["user_id"] == user["id"])
+
+
+def can_manage_departments(role_ctx: dict) -> bool:
+    """Create/delete departments — event_admin only."""
+    return role_ctx["level"] == "event_admin"
+
+
+def can_approve_budget(role_ctx: dict) -> bool:
+    """Approve/reject a submitted budget proposal — event_admin or finance_head."""
+    return role_ctx["level"] in ("event_admin", "finance_head")
+
+
+def can_access_department(role_ctx: dict, dept_id) -> bool:
+    """Can view/act on a given department's data at all."""
+    if role_ctx["level"] in ("event_admin", "finance_head"):
+        return True
+    if role_ctx["level"] in ("dept_head", "volunteer"):
+        return role_ctx["dept_id"] is not None and str(role_ctx["dept_id"]) == str(dept_id)
+    return False
+
+
+def can_edit_department(role_ctx: dict, dept_id) -> bool:
+    """Create/submit budget proposals & line items for a department —
+    event_admin, finance_head, or the dept_head of that specific department."""
+    if role_ctx["level"] in ("event_admin", "finance_head"):
+        return True
+    if role_ctx["level"] == "dept_head":
+        return role_ctx["dept_id"] is not None and str(role_ctx["dept_id"]) == str(dept_id)
+    return False
