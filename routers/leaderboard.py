@@ -119,6 +119,8 @@ def get_event_leaderboard(event_id: int, conn=Depends(get_db), user=Depends(get_
 
     # Fetch team volunteer & department roster
     volunteers = []
+    seen_names = set()
+
     try:
         cur_v = execute(conn, """
             SELECT u.id, u.name, u.email, u.avatar_color, r.role, r.dept_id, d.name as dept_name
@@ -127,9 +129,43 @@ def get_event_leaderboard(event_id: int, conn=Depends(get_db), user=Depends(get_
             LEFT JOIN departments d ON d.id = r.dept_id
             WHERE r.event_id = %s
         """, (event_id,))
-        volunteers = [dict(r) for r in cur_v.fetchall()]
+        for r in cur_v.fetchall():
+            row_dict = dict(r)
+            name_val = row_dict.get("name") or row_dict.get("email") or ""
+            seen_names.add(name_val.lower().strip())
+            volunteers.append(row_dict)
     except Exception:
         volunteers = []
+
+    # Synthesize Department Heads defined in departments table if not in user_event_roles yet
+    synth_id = 99000
+    for d in departments:
+        h_name = (d.get("head_name") or "").strip()
+        if h_name and h_name.lower() not in seen_names and h_name.lower() != "unassigned":
+            seen_names.add(h_name.lower())
+            synth_id += 1
+            volunteers.append({
+                "id": synth_id,
+                "name": h_name,
+                "email": f"{h_name.lower().replace(' ', '.')}@eventledger.internal",
+                "avatar_color": d.get("color") or "#6366f1",
+                "role": "dept_head",
+                "dept_id": d["id"],
+                "dept_name": d["name"],
+            })
+
+    # Include current requesting user if not in roster
+    user_name = (user.get("name") or user.get("email") or "").strip()
+    if user_name and user_name.lower() not in seen_names:
+        volunteers.append({
+            "id": user["id"],
+            "name": user_name,
+            "email": user.get("email") or "",
+            "avatar_color": user.get("avatar_color") or "#6366f1",
+            "role": "event_admin",
+            "dept_id": None,
+            "dept_name": "Event Management",
+        })
 
     for v in volunteers:
         uid = v["id"]
