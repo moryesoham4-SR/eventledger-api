@@ -76,7 +76,6 @@ def get_base_html_template(title: str, content_html: str, action_url: str = "", 
             .brand {{ font-size: 22px; font-weight: bold; color: #6366f1; letter-spacing: -0.5px; }}
             .title {{ font-size: 18px; font-weight: 700; color: #f8fafc; margin-top: 8px; }}
             .content {{ font-size: 14px; line-height: 1.6; color: #cbd5e1; }}
-            .badge {{ display: inline-block; padding: 4px 10px; border-radius: 6px; font-size: 12px; font-weight: bold; margin-bottom: 12px; }}
             .footer {{ border-top: 1px solid #334155; margin-top: 32px; padding-top: 16px; text-align: center; font-size: 11px; color: #64748b; }}
         </style>
     </head>
@@ -100,6 +99,40 @@ def get_base_html_template(title: str, content_html: str, action_url: str = "", 
     """
 
 # ==================== EMAIL NOTIFICATION DISPATCHERS ====================
+
+def send_budget_submitted_email(to_email: str, dept_name: str, proposal_title: str, total_amount: float, submitter_name: str):
+    subject = f"📊 Budget Submitted for Approval: '{proposal_title}' (₹{total_amount:,.2f})"
+    content = f"""
+    <p>A new department budget proposal has been <strong>submitted for your approval</strong>:</p>
+    <div style="background-color: #0f172a; border: 1px solid #334155; padding: 16px; border-radius: 12px; margin: 16px 0;">
+        <p style="margin: 4px 0;"><strong>Submitted By:</strong> {submitter_name}</p>
+        <p style="margin: 4px 0;"><strong>Department:</strong> {dept_name}</p>
+        <p style="margin: 4px 0;"><strong>Proposal Title:</strong> {proposal_title}</p>
+        <p style="margin: 4px 0; font-size: 18px; color: #6366f1;"><strong>Total Budget: ₹{total_amount:,.2f}</strong></p>
+    </div>
+    <p>Log in to EventLedger to review the line items and approve or reject this proposal.</p>
+    """
+    html = get_base_html_template("Budget Proposal Submitted", content, "https://eventledger-web.vercel.app/budget", "Review Budget Proposal")
+    dispatch_email_bg(to_email, subject, html)
+
+def send_budget_status_email(to_email: str, proposal_title: str, status: str, reviewer_name: str, reason: str = ""):
+    is_approved = status.lower() == "approved"
+    status_label = "APPROVED ✅" if is_approved else "REJECTED ❌"
+    color = "#10b981" if is_approved else "#ef4444"
+    subject = f"📊 Budget Proposal {status_label}: '{proposal_title}'"
+    
+    reason_html = f'<p style="margin: 4px 0; color: #f87171;"><strong>Reason:</strong> {reason}</p>' if reason else ""
+
+    content = f"""
+    <p>Your department budget proposal <strong>"{proposal_title}"</strong> has been reviewed by <strong>{reviewer_name}</strong>:</p>
+    <div style="background-color: #0f172a; border: 1px solid {color}; padding: 16px; border-radius: 12px; margin: 16px 0;">
+        <p style="margin: 4px 0;"><strong>Status:</strong> <span style="color: {color}; font-weight: bold;">{status_label}</span></p>
+        <p style="margin: 4px 0;"><strong>Reviewed By:</strong> {reviewer_name}</p>
+        {reason_html}
+    </div>
+    """
+    html = get_base_html_template(f"Budget {status_label}", content, "https://eventledger-web.vercel.app/budget", "View Budget Proposals")
+    dispatch_email_bg(to_email, subject, html)
 
 def send_claim_submitted_email(to_email: str, claimant_name: str, claim_amount: float, dept_name: str, item_name: str):
     subject = f"📥 New Claim Submitted: ₹{claim_amount:,.2f} for {item_name}"
