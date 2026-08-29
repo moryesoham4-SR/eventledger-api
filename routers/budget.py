@@ -7,6 +7,7 @@ from core.auth import get_current_user
 from utils.roles import get_event_role, can_access_department, can_edit_department, can_approve_budget
 from utils.db_safety import run_safely
 from utils.activity import log_activity, ACTION_BUDGET_SUBMITTED, ACTION_BUDGET_APPROVED, ACTION_BUDGET_REJECTED, ACTION_BUDGET_IMPORTED
+from utils.email import send_budget_submitted_email, send_budget_status_email
 import datetime
 import io
 import openpyxl
@@ -38,7 +39,6 @@ class LineItemCreate(BaseModel):
 class RejectRequest(BaseModel):
     reason: str
 
-
 def _get_proposal_or_404(conn, proposal_id):
     cur = execute(conn, "SELECT * FROM budget_proposals WHERE id=%s", (proposal_id,))
     p = cur.fetchone()
@@ -46,27 +46,19 @@ def _get_proposal_or_404(conn, proposal_id):
         raise HTTPException(status_code=404, detail="Proposal not found")
     return dict(p)
 
-
 def _notify(conn, user_id, message):
-    """Persists a notification. Callers wrap their notification block in a
-    SAVEPOINT (see submit/approve/reject below) so any failure here can never
-    roll back the real action it's attached to."""
     if not user_id:
         return
     execute(conn, "INSERT INTO notifications (user_id, message, is_read) VALUES (%s,%s,0)", (user_id, message))
 
-
-
 def _get_approver_ids(conn, event_id, exclude_user_id=None):
-    """Everyone who can approve budgets on this event: the event owner, plus
-    anyone explicitly assigned event_admin/finance_head for it."""
     ids = set()
     cur = execute(conn, "SELECT user_id FROM events WHERE id=%s", (event_id,))
     owner = cur.fetchone()
     if owner:
         ids.add(owner["user_id"])
     cur = execute(conn,
-        "SELECT user_id FROM user_event_roles WHERE event_id=%s AND role IN ('event_admin','finance_head')",
+        "SELECT user_id FROM user_event_roles WHERE event_id=%s AND role IN ('event_admin','co_leader','finance_head')",
         (event_id,)
     )
     for row in cur.fetchall():
@@ -74,48 +66,52 @@ def _get_approver_ids(conn, event_id, exclude_user_id=None):
     ids.discard(exclude_user_id)
     return ids
 
-
 @router.get("/proposals")
 def get_proposals(event_id: int, conn=Depends(get_db), user=Depends(get_current_user)):
     role_ctx = get_event_role(conn, user, event_id)
     if role_ctx["level"] is None:
         raise HTTPException(status_code=403, detail="You don't have access to this event")
 
-    if role_ctx["level"] in ("dept_head", "volunteer"):
-        if not role_ctx["dept_id"]:
-            return []
-        cur = execute(conn,
-            """SELECT p.*, d.name as dept_name, u.name as submitted_by_name
-               FROM budget_proposals p
-               LEFT JOIN departments d ON d.id=p.department_id
-               LEFT JOIN users u ON u.id=p.submitted_by
-               WHERE p.event_id=%s AND p.department_id=%s ORDER BY p.created_at DESC""",
-            (event_id, role_ctx["dept_id"])
-        )
-    else:
-        cur = execute(conn,
-            """SELECT p.*, d.name as dept_name, u.name as submitted_by_name
-               FROM budget_proposals p
-               LEFT JOIN departments d ON d.id=p.department_id
-               LEFT JOIN users u ON u.id=p.submitted_by
-               WHERE p.event_id=%s ORDER BY p.created_at DESC""",
-            (event_id,)
-        )
-    return [dict(r) for r in cur.fetchall()]
+    cur = execute(conn,
+        """SELECT p.*, d.name as dept_name,
+                  u_app.name as approved_by_name,
+                  u_rej.name as rejected_by_name,
+                  (SELECT COALESCE(SUM(total_amount), 0) FROM budget_line_items WHERE proposal_id = p.id) as total_amount
+           FROM budget_proposals p
+           LEFT JOIN departments d ON d.id = p.department_id
+           LEFT JOIN users u_app ON u_app.id = p.approved_by
+           LEFT JOIN users u_rej ON u_rej.id = p.rejected_by
+           WHERE p.event_id = %s
+           ORDER BY p.created_at DESC""",
+        (event_id,)
+    )
+    proposals = [dict(r) for r in cur.fetchall()]
+
+    visible = [p for p in proposals if can_access_department(role_ctx, p["department_id"])]
+
+    for p in visible:
+        cur_items = execute(conn, "SELECT * FROM budget_line_items WHERE proposal_id=%s ORDER BY id", (p["id"],))
+        p["line_items"] = [dict(r) for r in cur_items.fetchall()]
+
+    return visible
 
 @router.post("/proposals")
 def create_proposal(data: ProposalCreate, conn=Depends(get_db), user=Depends(get_current_user)):
     role_ctx = get_event_role(conn, user, data.event_id)
     if not can_edit_department(role_ctx, data.department_id):
-        raise HTTPException(status_code=403, detail="You can't create a budget proposal for this department")
+        raise HTTPException(status_code=403, detail="You can't create budget proposals for this department")
+
     cur = execute(conn,
-        "INSERT INTO budget_proposals (event_id,department_id,submitted_by,title,notes,status) VALUES (%s,%s,%s,%s,%s,'draft') RETURNING *",
-        (data.event_id, data.department_id, user["id"], data.title, data.notes)
+        """INSERT INTO budget_proposals (event_id, department_id, title, notes, created_by, submitted_by, status)
+           VALUES (%s, %s, %s, %s, %s, %s, 'draft') RETURNING *""",
+        (data.event_id, data.department_id, data.title, data.notes, user["id"], user["id"])
     )
-    return dict(cur.fetchone())
+    p = dict(cur.fetchone())
+    p["line_items"] = []
+    return p
 
 @router.get("/proposals/{proposal_id}")
-def get_proposal(proposal_id: int, conn=Depends(get_db), user=Depends(get_current_user)):
+def get_proposal_detail(proposal_id: int, conn=Depends(get_db), user=Depends(get_current_user)):
     p = _get_proposal_or_404(conn, proposal_id)
     role_ctx = get_event_role(conn, user, p["event_id"])
     if not can_access_department(role_ctx, p["department_id"]):
@@ -149,8 +145,13 @@ def submit_proposal(proposal_id: int, conn=Depends(get_db), user=Depends(get_cur
     def _notify_approvers():
         cur = execute(conn, "SELECT d.name AS dept_name, e.name AS event_name FROM departments d JOIN events e ON e.id=d.event_id WHERE d.id=%s", (p["department_id"],))
         ctx = cur.fetchone()
+        dept_title = ctx['dept_name'] if ctx else "Department"
         for uid in _get_approver_ids(conn, p["event_id"], exclude_user_id=user["id"]):
-            _notify(conn, uid, f"New budget \"{p['title']}\" from {ctx['dept_name']} needs your approval — {ctx['event_name']}")
+            _notify(conn, uid, f"New budget \"{p['title']}\" from {dept_title} needs your approval — {ctx['event_name'] if ctx else ''}")
+            cur_u = execute(conn, "SELECT email FROM users WHERE id=%s", (uid,))
+            app_u = cur_u.fetchone()
+            if app_u and app_u.get("email"):
+                send_budget_submitted_email(app_u["email"], dept_title, p["title"], total, user.get("name") or "Dept Head")
     run_safely(conn, _notify_approvers)
     log_activity(conn, p["event_id"], user["id"], ACTION_BUDGET_SUBMITTED,
                  f"{user['name']} submitted budget \"{p['title']}\" for approval")
@@ -171,6 +172,11 @@ def approve_proposal(proposal_id: int, conn=Depends(get_db), user=Depends(get_cu
     )
     if p.get("submitted_by") and p["submitted_by"] != user["id"]:
         run_safely(conn, lambda: _notify(conn, p["submitted_by"], f"Your budget \"{p['title']}\" was approved ✅"))
+        cur_sub = execute(conn, "SELECT email FROM users WHERE id=%s", (p["submitted_by"],))
+        sub_u = cur_sub.fetchone()
+        if sub_u and sub_u.get("email"):
+            send_budget_status_email(sub_u["email"], p["title"], "approved", user.get("name") or "Finance Lead", "")
+
     log_activity(conn, p["event_id"], user["id"], ACTION_BUDGET_APPROVED,
                  f"{user['name']} approved budget \"{p['title']}\"")
     return {"ok": True, "message": "Budget approved"}
@@ -190,6 +196,11 @@ def reject_proposal(proposal_id: int, data: RejectRequest, conn=Depends(get_db),
     if p.get("submitted_by") and p["submitted_by"] != user["id"]:
         reason_suffix = f": {data.reason}" if data.reason else ""
         run_safely(conn, lambda: _notify(conn, p["submitted_by"], f"Your budget \"{p['title']}\" was rejected{reason_suffix}"))
+        cur_sub = execute(conn, "SELECT email FROM users WHERE id=%s", (p["submitted_by"],))
+        sub_u = cur_sub.fetchone()
+        if sub_u and sub_u.get("email"):
+            send_budget_status_email(sub_u["email"], p["title"], "rejected", user.get("name") or "Finance Lead", data.reason)
+
     log_activity(conn, p["event_id"], user["id"], ACTION_BUDGET_REJECTED,
                  f"{user['name']} rejected budget \"{p['title']}\"" + (f" — {data.reason}" if data.reason else ""))
     return {"ok": True, "message": "Budget rejected"}
@@ -219,136 +230,5 @@ def delete_line_item(item_id: int, conn=Depends(get_db), user=Depends(get_curren
     role_ctx = get_event_role(conn, user, p["event_id"])
     if not can_edit_department(role_ctx, p["department_id"]):
         raise HTTPException(status_code=403, detail="You can't edit this budget proposal")
-
     execute(conn, "DELETE FROM budget_line_items WHERE id=%s", (item_id,))
     return {"ok": True}
-
-@router.get("/export")
-def export_budget(event_id: int, conn=Depends(get_db), user=Depends(get_current_user)):
-    """Downloads every proposal (scoped the same way the list view is —
-    dept_head/volunteer only see their own department) as an .xlsx workbook."""
-    role_ctx = get_event_role(conn, user, event_id)
-    if role_ctx["level"] is None:
-        raise HTTPException(status_code=403, detail="You don't have access to this event")
-
-    base_query = """
-        SELECT d.name AS dept_name, p.title, p.status, li.category, li.item_name,
-               li.description, li.quantity, li.unit, li.unit_price, li.total_amount
-        FROM budget_proposals p
-        JOIN departments d ON d.id = p.department_id
-        LEFT JOIN budget_line_items li ON li.proposal_id = p.id
-        WHERE p.event_id = %s {dept_filter}
-        ORDER BY d.name, p.title, li.id
-    """
-    if role_ctx["level"] in ("dept_head", "volunteer"):
-        cur = execute(conn, base_query.format(dept_filter="AND p.department_id = %s"), (event_id, role_ctx["dept_id"]))
-    else:
-        cur = execute(conn, base_query.format(dept_filter=""), (event_id,))
-    rows = cur.fetchall()
-
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "Budget"
-    ws.append(EXPORT_HEADERS)
-    for col in range(1, len(EXPORT_HEADERS) + 1):
-        ws.cell(row=1, column=col).font = openpyxl.styles.Font(bold=True)
-    for r in rows:
-        ws.append([
-            r["dept_name"], r["title"], r["status"], r["category"], r["item_name"],
-            r["description"], r["quantity"], r["unit"], r["unit_price"], r["total_amount"],
-        ])
-    for i, header in enumerate(EXPORT_HEADERS, 1):
-        ws.column_dimensions[get_column_letter(i)].width = max(14, len(header) + 2)
-
-    buf = io.BytesIO()
-    wb.save(buf)
-    buf.seek(0)
-    return StreamingResponse(
-        buf,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f"attachment; filename=budget_export_event_{event_id}.xlsx"},
-    )
-
-@router.post("/import")
-async def import_budget(
-    event_id: int = Form(...),
-    file: UploadFile = File(...),
-    conn=Depends(get_db),
-    user=Depends(get_current_user),
-):
-    """Bulk-creates proposals + line items from an .xlsx with the same
-    columns as /export. Rows are grouped into one proposal per unique
-    (Department, Proposal Title) pair; every imported proposal starts as
-    a draft regardless of the Status column, so it still goes through the
-    normal submit/approve flow. Department names must already exist on
-    this event (created via the Departments page) — unmatched rows are
-    reported back rather than silently skipped or auto-creating a department."""
-    role_ctx = get_event_role(conn, user, event_id)
-    if role_ctx["level"] not in ("event_admin", "finance_head"):
-        raise HTTPException(status_code=403, detail="Only an event admin or finance head can import a budget")
-
-    contents = await file.read()
-    try:
-        wb = openpyxl.load_workbook(io.BytesIO(contents), data_only=True)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Couldn't read that file — is it a valid .xlsx?")
-    ws = wb.active
-
-    cur = execute(conn, "SELECT id, name FROM departments WHERE event_id=%s", (event_id,))
-    dept_map = {row["name"].strip().lower(): row["id"] for row in cur.fetchall()}
-
-    proposal_cache = {}
-    created_proposals = 0
-    created_items = 0
-    errors = []
-
-    for idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
-        if not row or not any(row):
-            continue
-        padded = (list(row) + [None] * 10)[:10]
-        dept_name, title, _status, category, item_name, description, quantity, unit, unit_price, total_amount = padded
-
-        if not dept_name or not title:
-            errors.append(f"Row {idx}: missing department or proposal title")
-            continue
-        dept_id = dept_map.get(str(dept_name).strip().lower())
-        if not dept_id:
-            errors.append(f"Row {idx}: no department named '{dept_name}' on this event")
-            continue
-
-        key = (dept_id, str(title).strip())
-        if key not in proposal_cache:
-            cur = execute(
-                conn,
-                "INSERT INTO budget_proposals (event_id,department_id,submitted_by,title,notes,status) VALUES (%s,%s,%s,%s,'',  'draft') RETURNING id",
-                (event_id, dept_id, user["id"], str(title).strip()),
-            )
-            proposal_cache[key] = cur.fetchone()["id"]
-            created_proposals += 1
-        proposal_id = proposal_cache[key]
-
-        if category or item_name:
-            try:
-                qty = float(quantity) if quantity not in (None, "") else 1
-                price = float(unit_price) if unit_price not in (None, "") else 0
-            except (TypeError, ValueError):
-                errors.append(f"Row {idx}: quantity/unit price must be numbers")
-                continue
-            total = float(total_amount) if total_amount not in (None, "") else qty * price
-            execute(
-                conn,
-                """INSERT INTO budget_line_items (proposal_id,category,item_name,description,quantity,unit,unit_price,total_amount)
-                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
-                (proposal_id, category or "", item_name or "", description or "", qty, unit or "unit", price, total),
-            )
-            created_items += 1
-
-    log_activity(conn, event_id, user["id"], ACTION_BUDGET_IMPORTED,
-                 f"{user['name']} imported {created_proposals} budget proposal(s) from a spreadsheet")
-
-    return {
-        "ok": True,
-        "proposals_created": created_proposals,
-        "line_items_created": created_items,
-        "errors": errors,
-    }
