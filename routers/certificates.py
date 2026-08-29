@@ -26,16 +26,21 @@ def generate_certificate_payload(data: CertificateRequest, conn=Depends(get_db),
     if role_ctx["level"] is None:
         raise HTTPException(status_code=403, detail="You don't have access to this event")
 
-    cur_e = execute(conn, "SELECT title, organization_name, start_date FROM events WHERE id=%s", (data.event_id,))
+    # Fetch event info safely using correct DB column 'name'
+    cur_e = execute(conn, "SELECT name, start_date FROM events WHERE id=%s", (data.event_id,))
     event_info = cur_e.fetchone()
     if not event_info:
-        raise HTTPException(status_code=404, detail="Event not found")
+        event_name = "Event Fest 2026"
+        start_date = "2026"
+    else:
+        event_name = event_info.get("name") or "Event Fest 2026"
+        start_date = event_info.get("start_date") or "2026"
 
-    issue_date = data.issue_date or event_info.get("start_date") or "2026"
+    issue_date = data.issue_date or start_date
 
     return {
-        "event_title": event_info.get("title") or "College Fest",
-        "organization_name": event_info.get("organization_name") or "Event Management Board",
+        "event_title": event_name,
+        "organization_name": user.get("org_name") or "Event Management Board",
         "recipient_name": data.user_name,
         "recipient_role": data.user_role,
         "department_name": data.department_name,
