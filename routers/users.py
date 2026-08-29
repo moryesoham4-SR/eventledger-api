@@ -5,6 +5,7 @@ from core.database import get_db, execute
 from core.auth import get_current_user, hash_password, verify_password
 from utils.roles import get_event_role, is_event_owner_or_super_admin
 from utils.db_safety import run_safely
+from utils.email import send_team_invite_email
 import re
 
 router = APIRouter(prefix="/api/users", tags=["users"])
@@ -45,10 +46,6 @@ def validate_and_clean_email(raw_email: str) -> str:
     if not re.match(email_regex, cleaned):
         raise HTTPException(status_code=400, detail="Invalid email format")
     return cleaned
-
-def send_invite_email(to_email: str, inviter_name: str, role_title: str, event_name: str):
-    # Logged mock invite email dispatch
-    print(f"📧 [INVITE EMAIL DISPATCHED] To: {to_email} | Inviter: {inviter_name} | Role: {role_title} | Event: {event_name}")
 
 @router.get("/me")
 def get_my_profile(user=Depends(get_current_user)):
@@ -173,8 +170,9 @@ def invite_member(data: InviteMemberRequest, conn=Depends(get_db), user=Depends(
         VALUES (%s, %s, %s, %s, %s, %s)
     """, (target_id, notif_msg, "info", "general", data.event_id, "/dashboard")))
 
+    # Dispatch rich HTML email notification in background
     try:
-        send_invite_email(target_email, user.get("name") or "Event Admin", role_title, ev_name)
+        send_team_invite_email(target_email, target_user.get("name") or "Team Member", role_title, ev_name)
     except Exception as err:
         print(f"Error sending invite email: {err}")
 
@@ -232,6 +230,17 @@ def assign_role(data: RoleAssign, conn=Depends(get_db), user=Depends(get_current
                VALUES (%s,%s,%s,%s,%s)""",
             (data.user_id, data.event_id, data.role, data.dept_id, user["id"])
         )
+
+        cur_u = execute(conn, "SELECT email, name FROM users WHERE id=%s", (data.user_id,))
+        target_u = cur_u.fetchone()
+        cur_e = execute(conn, "SELECT name FROM events WHERE id=%s", (data.event_id,))
+        ev_row = cur_e.fetchone()
+        if target_u and target_u.get("email") and ev_row:
+            try:
+                send_team_invite_email(target_u["email"], target_u.get("name") or "Team Member", data.role.replace("_", " ").title(), ev_row["name"])
+            except Exception as err:
+                print(f"Error sending role update email: {err}")
+
     return {"ok": True}
 
 @router.post("/reset-password")

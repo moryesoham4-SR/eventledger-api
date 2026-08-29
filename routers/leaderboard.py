@@ -4,6 +4,7 @@ from core.database import get_db, execute
 from core.auth import get_current_user
 from utils.roles import get_event_role
 from utils.db_safety import run_safely
+from utils.email import send_certificates_unlocked_email
 from routers.reimbursements import ensure_reimbursements_schema
 
 router = APIRouter(prefix="/api/leaderboard", tags=["leaderboard"])
@@ -28,6 +29,21 @@ def toggle_certificate_issuance(event_id: int, data: ToggleCertificatesRequest, 
 
     ensure_certificates_schema(conn)
     execute(conn, "UPDATE events SET certificates_enabled=%s WHERE id=%s", (data.enabled, event_id))
+
+    if data.enabled:
+        cur_e = execute(conn, "SELECT name FROM events WHERE id=%s", (event_id,))
+        ev_row = cur_e.fetchone()
+        ev_name = ev_row["name"] if ev_row else "Event Fest 2026"
+
+        cur_team = execute(conn, """
+            SELECT DISTINCT u.email, u.name FROM user_event_roles r
+            JOIN users u ON u.id = r.user_id
+            WHERE r.event_id = %s
+        """, (event_id,))
+        for t in cur_team.fetchall():
+            if t.get("email"):
+                send_certificates_unlocked_email(t["email"], t.get("name") or "Team Member", ev_name)
+
     return {"ok": True, "certificates_enabled": data.enabled}
 
 @router.get("/")
