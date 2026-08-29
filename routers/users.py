@@ -27,6 +27,7 @@ class InviteMemberRequest(BaseModel):
     role: str = "volunteer"
     dept_id: Optional[int] = None
     name: Optional[str] = None
+    password: Optional[str] = None
 
 class RoleAssign(BaseModel):
     user_id: int
@@ -142,11 +143,11 @@ def invite_member(data: InviteMemberRequest, conn=Depends(get_db), user=Depends(
     
     if not target_user:
         name_str = data.name.strip() if data.name else target_email.split("@")[0].capitalize()
-        random_pwd = hash_password(f"invite_{target_email}_secret")
+        pwd_to_use = hash_password(data.password) if (data.password and data.password.strip()) else hash_password(f"invite_{target_email}_secret")
         cur = execute(
             conn,
             "INSERT INTO users (name, email, password, role, is_super_admin, org_name) VALUES (%s, %s, %s, %s, %s, %s) RETURNING *",
-            (name_str, target_email, random_pwd, data.role, 0, user.get("org_name") or "Event Team")
+            (name_str, target_email, pwd_to_use, data.role, 0, user.get("org_name") or "Event Team")
         )
         target_user = cur.fetchone()
     else:
