@@ -74,6 +74,24 @@ def delete_my_account(conn=Depends(get_db), user=Depends(get_current_user)):
         execute(conn, "UPDATE users SET is_active=0, email=CONCAT(email, '_deleted_', id) WHERE id=%s", (user_id,))
     return {"ok": True, "message": "Account deleted successfully"}
 
+@router.delete("/{user_id}")
+def delete_user_by_admin(user_id: int, conn=Depends(get_db), user=Depends(get_current_user)):
+    _require_super_admin(user)
+    if user_id == user["id"]:
+        raise HTTPException(status_code=400, detail="You cannot delete your own account from here.")
+
+    run_safely(conn, lambda: execute(conn, "DELETE FROM notifications WHERE user_id=%s", (user_id,)))
+    run_safely(conn, lambda: execute(conn, "DELETE FROM user_event_roles WHERE user_id=%s", (user_id,)))
+    run_safely(conn, lambda: execute(conn, "DELETE FROM user_roles WHERE user_id=%s", (user_id,)))
+    run_safely(conn, lambda: execute(conn, "DELETE FROM audit_log WHERE user_id=%s", (user_id,)))
+
+    try:
+        execute(conn, "DELETE FROM users WHERE id=%s", (user_id,))
+    except Exception:
+        execute(conn, "UPDATE users SET is_active=0, email=CONCAT(email, '_deleted_', id) WHERE id=%s", (user_id,))
+
+    return {"ok": True, "message": "User deleted successfully"}
+
 @router.put("/me")
 def update_my_profile(data: ProfileUpdate, conn=Depends(get_db), user=Depends(get_current_user)):
     fields = []
@@ -166,9 +184,10 @@ def get_users(event_id: Optional[int] = None, conn=Depends(get_db), user=Depends
     _require_super_admin(user)
     if event_id:
         cur = execute(conn, """
-            SELECT u.id, u.name, u.email, COALESCE(r.role, u.role) as role, u.is_super_admin, u.org_name, u.avatar_color, u.is_active, u.created_at
+            SELECT u.id, u.name, u.email, COALESCE(r.role, u.role) as role, r.dept_id, d.name as dept_name, u.is_super_admin, u.org_name, u.avatar_color, u.is_active, u.created_at
             FROM users u
             LEFT JOIN user_event_roles r ON r.user_id = u.id AND r.event_id = %s
+            LEFT JOIN departments d ON d.id = r.dept_id
             WHERE u.org_name = %s
             ORDER BY u.name
         """, (event_id, user.get("org_name") or ""))
@@ -185,8 +204,9 @@ def get_event_users(event_id: int, conn=Depends(get_db), user=Depends(get_curren
     if role_ctx["level"] is None:
         raise HTTPException(status_code=403, detail="You don't have access to this event")
     cur = execute(conn,
-        """SELECT u.id,u.name,u.email,u.avatar_color,r.role,r.dept_id
+        """SELECT u.id,u.name,u.email,u.avatar_color,r.role,r.dept_id, d.name as dept_name
            FROM user_event_roles r JOIN users u ON u.id=r.user_id
+           LEFT JOIN departments d ON d.id = r.dept_id
            WHERE r.event_id=%s""",
         (event_id,)
     )
