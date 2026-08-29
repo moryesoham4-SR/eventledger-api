@@ -24,22 +24,68 @@ class ProposalCreate(BaseModel):
     event_id: int
     department_id: int
     title: str
-    notes: str = ""
+    notes: Optional[str] = ""
 
 class LineItemCreate(BaseModel):
     proposal_id: int
     category: str
     item_name: str
-    description: str = ""
+    description: Optional[str] = ""
     quantity: float = 1
     unit: str = "unit"
     unit_price: float
     total_amount: float
 
 class RejectRequest(BaseModel):
-    reason: str
+    reason: Optional[str] = ""
+
+def ensure_budget_schema(conn):
+    """Ensures budget_proposals and budget_line_items tables and missing columns exist safely."""
+    run_safely(conn, lambda: execute(conn, """
+        CREATE TABLE IF NOT EXISTS budget_proposals (
+            id SERIAL PRIMARY KEY,
+            event_id INT NOT NULL,
+            department_id INT NOT NULL,
+            title VARCHAR(255) NOT NULL,
+            notes TEXT,
+            status VARCHAR(20) DEFAULT 'draft',
+            total_amount NUMERIC(12,2) DEFAULT 0,
+            created_by INT,
+            submitted_by INT,
+            approved_by INT,
+            rejected_by INT,
+            reject_reason TEXT,
+            submitted_at VARCHAR(50),
+            approved_at VARCHAR(50),
+            rejected_at VARCHAR(50),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    """))
+
+    run_safely(conn, lambda: execute(conn, """
+        CREATE TABLE IF NOT EXISTS budget_line_items (
+            id SERIAL PRIMARY KEY,
+            proposal_id INT NOT NULL,
+            category VARCHAR(100),
+            item_name VARCHAR(255) NOT NULL,
+            description TEXT,
+            quantity NUMERIC(12,2) DEFAULT 1,
+            unit VARCHAR(50) DEFAULT 'unit',
+            unit_price NUMERIC(12,2) DEFAULT 0,
+            total_amount NUMERIC(12,2) DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    """))
+
+    run_safely(conn, lambda: execute(conn, "ALTER TABLE budget_proposals ADD COLUMN IF NOT EXISTS notes TEXT"))
+    run_safely(conn, lambda: execute(conn, "ALTER TABLE budget_proposals ADD COLUMN IF NOT EXISTS created_by INT"))
+    run_safely(conn, lambda: execute(conn, "ALTER TABLE budget_proposals ADD COLUMN IF NOT EXISTS submitted_by INT"))
+    run_safely(conn, lambda: execute(conn, "ALTER TABLE budget_proposals ADD COLUMN IF NOT EXISTS approved_by INT"))
+    run_safely(conn, lambda: execute(conn, "ALTER TABLE budget_proposals ADD COLUMN IF NOT EXISTS rejected_by INT"))
+    run_safely(conn, lambda: execute(conn, "ALTER TABLE budget_proposals ADD COLUMN IF NOT EXISTS reject_reason TEXT"))
 
 def _get_proposal_or_404(conn, proposal_id):
+    ensure_budget_schema(conn)
     cur = execute(conn, "SELECT * FROM budget_proposals WHERE id=%s", (proposal_id,))
     p = cur.fetchone()
     if not p:
@@ -68,44 +114,67 @@ def _get_approver_ids(conn, event_id, exclude_user_id=None):
 
 @router.get("/proposals")
 def get_proposals(event_id: int, conn=Depends(get_db), user=Depends(get_current_user)):
+    ensure_budget_schema(conn)
     role_ctx = get_event_role(conn, user, event_id)
     if role_ctx["level"] is None:
         raise HTTPException(status_code=403, detail="You don't have access to this event")
 
-    cur = execute(conn,
-        """SELECT p.*, d.name as dept_name,
-                  u_app.name as approved_by_name,
-                  u_rej.name as rejected_by_name,
-                  (SELECT COALESCE(SUM(total_amount), 0) FROM budget_line_items WHERE proposal_id = p.id) as total_amount
-           FROM budget_proposals p
-           LEFT JOIN departments d ON d.id = p.department_id
-           LEFT JOIN users u_app ON u_app.id = p.approved_by
-           LEFT JOIN users u_rej ON u_rej.id = p.rejected_by
-           WHERE p.event_id = %s
-           ORDER BY p.created_at DESC""",
-        (event_id,)
-    )
-    proposals = [dict(r) for r in cur.fetchall()]
+    try:
+        cur = execute(conn,
+            """SELECT p.*, d.name as dept_name,
+                      u_app.name as approved_by_name,
+                      u_rej.name as rejected_by_name,
+                      (SELECT COALESCE(SUM(total_amount), 0) FROM budget_line_items WHERE proposal_id = p.id) as total_amount
+               FROM budget_proposals p
+               LEFT JOIN departments d ON d.id = p.department_id
+               LEFT JOIN users u_app ON u_app.id = p.approved_by
+               LEFT JOIN users u_rej ON u_rej.id = p.rejected_by
+               WHERE p.event_id = %s
+               ORDER BY p.created_at DESC""",
+            (event_id,)
+        )
+        proposals = [dict(r) for r in cur.fetchall()]
+    except Exception:
+        cur = execute(conn,
+            """SELECT p.*, d.name as dept_name FROM budget_proposals p
+               LEFT JOIN departments d ON d.id = p.department_id
+               WHERE p.event_id = %s
+               ORDER BY p.id DESC""",
+            (event_id,)
+        )
+        proposals = [dict(r) for r in cur.fetchall()]
 
     visible = [p for p in proposals if can_access_department(role_ctx, p["department_id"])]
 
     for p in visible:
-        cur_items = execute(conn, "SELECT * FROM budget_line_items WHERE proposal_id=%s ORDER BY id", (p["id"],))
-        p["line_items"] = [dict(r) for r in cur_items.fetchall()]
+        try:
+            cur_items = execute(conn, "SELECT * FROM budget_line_items WHERE proposal_id=%s ORDER BY id", (p["id"],))
+            p["line_items"] = [dict(r) for r in cur_items.fetchall()]
+        except Exception:
+            p["line_items"] = []
 
     return visible
 
 @router.post("/proposals")
 def create_proposal(data: ProposalCreate, conn=Depends(get_db), user=Depends(get_current_user)):
+    ensure_budget_schema(conn)
     role_ctx = get_event_role(conn, user, data.event_id)
     if not can_edit_department(role_ctx, data.department_id):
         raise HTTPException(status_code=403, detail="You can't create budget proposals for this department")
 
-    cur = execute(conn,
-        """INSERT INTO budget_proposals (event_id, department_id, title, notes, created_by, submitted_by, status)
-           VALUES (%s, %s, %s, %s, %s, %s, 'draft') RETURNING *""",
-        (data.event_id, data.department_id, data.title, data.notes, user["id"], user["id"])
-    )
+    try:
+        cur = execute(conn,
+            """INSERT INTO budget_proposals (event_id, department_id, title, notes, created_by, submitted_by, status)
+               VALUES (%s, %s, %s, %s, %s, %s, 'draft') RETURNING *""",
+            (data.event_id, data.department_id, data.title, data.notes or "", user["id"], user["id"])
+        )
+    except Exception:
+        cur = execute(conn,
+            """INSERT INTO budget_proposals (event_id, department_id, title, status)
+               VALUES (%s, %s, %s, 'draft') RETURNING *""",
+            (data.event_id, data.department_id, data.title)
+        )
+
     p = dict(cur.fetchone())
     p["line_items"] = []
     return p
@@ -123,8 +192,11 @@ def get_proposal_detail(proposal_id: int, conn=Depends(get_db), user=Depends(get
         (proposal_id,)
     )
     result = dict(cur.fetchone())
-    cur2 = execute(conn, "SELECT * FROM budget_line_items WHERE proposal_id=%s", (proposal_id,))
-    result["line_items"] = [dict(r) for r in cur2.fetchall()]
+    try:
+        cur2 = execute(conn, "SELECT * FROM budget_line_items WHERE proposal_id=%s", (proposal_id,))
+        result["line_items"] = [dict(r) for r in cur2.fetchall()]
+    except Exception:
+        result["line_items"] = []
     return result
 
 @router.post("/proposals/{proposal_id}/submit")
@@ -135,8 +207,12 @@ def submit_proposal(proposal_id: int, conn=Depends(get_db), user=Depends(get_cur
         raise HTTPException(status_code=403, detail="You can't submit this budget proposal")
 
     now = datetime.datetime.utcnow().isoformat()
-    cur = execute(conn, "SELECT COALESCE(SUM(total_amount),0) as t FROM budget_line_items WHERE proposal_id=%s", (proposal_id,))
-    total = float(list(cur.fetchone().values())[0])
+    try:
+        cur = execute(conn, "SELECT COALESCE(SUM(total_amount),0) as t FROM budget_line_items WHERE proposal_id=%s", (proposal_id,))
+        total = float(list(cur.fetchone().values())[0])
+    except Exception:
+        total = 0.0
+
     execute(conn,
         "UPDATE budget_proposals SET status='submitted', submitted_at=%s, total_amount=%s WHERE id=%s",
         (now, total, proposal_id)
@@ -189,24 +265,26 @@ def reject_proposal(proposal_id: int, data: RejectRequest, conn=Depends(get_db),
         raise HTTPException(status_code=403, detail="Only an event admin or finance role can reject budgets")
 
     now = datetime.datetime.utcnow().isoformat()
+    reason_str = data.reason or ""
     execute(conn,
         "UPDATE budget_proposals SET status='rejected', rejected_by=%s, rejected_at=%s, reject_reason=%s WHERE id=%s",
-        (user["id"], now, data.reason, proposal_id)
+        (user["id"], now, reason_str, proposal_id)
     )
     if p.get("submitted_by") and p["submitted_by"] != user["id"]:
-        reason_suffix = f": {data.reason}" if data.reason else ""
+        reason_suffix = f": {reason_str}" if reason_str else ""
         run_safely(conn, lambda: _notify(conn, p["submitted_by"], f"Your budget \"{p['title']}\" was rejected{reason_suffix}"))
         cur_sub = execute(conn, "SELECT email FROM users WHERE id=%s", (p["submitted_by"],))
         sub_u = cur_sub.fetchone()
         if sub_u and sub_u.get("email"):
-            send_budget_status_email(sub_u["email"], p["title"], "rejected", user.get("name") or "Finance Lead", data.reason)
+            send_budget_status_email(sub_u["email"], p["title"], "rejected", user.get("name") or "Finance Lead", reason_str)
 
     log_activity(conn, p["event_id"], user["id"], ACTION_BUDGET_REJECTED,
-                 f"{user['name']} rejected budget \"{p['title']}\"" + (f" — {data.reason}" if data.reason else ""))
+                 f"{user['name']} rejected budget \"{p['title']}\"" + (f" — {reason_str}" if reason_str else ""))
     return {"ok": True, "message": "Budget rejected"}
 
 @router.post("/line-items")
 def add_line_item(data: LineItemCreate, conn=Depends(get_db), user=Depends(get_current_user)):
+    ensure_budget_schema(conn)
     p = _get_proposal_or_404(conn, data.proposal_id)
     role_ctx = get_event_role(conn, user, p["event_id"])
     if not can_edit_department(role_ctx, p["department_id"]):
@@ -215,13 +293,14 @@ def add_line_item(data: LineItemCreate, conn=Depends(get_db), user=Depends(get_c
     cur = execute(conn,
         """INSERT INTO budget_line_items (proposal_id,category,item_name,description,quantity,unit,unit_price,total_amount)
            VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *""",
-        (data.proposal_id, data.category, data.item_name, data.description,
+        (data.proposal_id, data.category, data.item_name, data.description or "",
          data.quantity, data.unit, data.unit_price, data.total_amount)
     )
     return dict(cur.fetchone())
 
 @router.delete("/line-items/{item_id}")
 def delete_line_item(item_id: int, conn=Depends(get_db), user=Depends(get_current_user)):
+    ensure_budget_schema(conn)
     cur = execute(conn, "SELECT proposal_id FROM budget_line_items WHERE id=%s", (item_id,))
     li = cur.fetchone()
     if not li:
