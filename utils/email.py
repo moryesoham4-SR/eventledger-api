@@ -1,5 +1,6 @@
 import os
 import smtplib
+import socket
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import threading
@@ -8,7 +9,7 @@ import threading
 SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
 SMTP_USER = os.getenv("SMTP_USER", "")
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "").replace(" ", "")
 EMAILS_FROM_NAME = os.getenv("EMAILS_FROM_NAME", "EventLedger AI")
 EMAILS_FROM_ADDRESS = os.getenv("EMAILS_FROM_ADDRESS", "") or SMTP_USER or "notifications@eventledger.internal"
 
@@ -22,7 +23,7 @@ def get_super_admin_emails(conn) -> list:
         return []
 
 def _send_email_thread(to_email: str, subject: str, html_body: str, text_body: str):
-    """Executes actual SMTP email dispatch in background thread."""
+    """Executes actual SMTP email dispatch in background thread with IPv4 resolution fallback."""
     if not to_email or "@" not in to_email or "internal" in to_email:
         print(f"📧 [EMAIL SKIPPED] Internal or invalid address: {to_email}")
         return
@@ -32,7 +33,8 @@ def _send_email_thread(to_email: str, subject: str, html_body: str, text_body: s
     print(f"   To: {to_email}")
     print(f"   Subject: {subject}")
 
-    if not SMTP_USER or not SMTP_PASSWORD:
+    clean_pwd = (SMTP_PASSWORD or "").replace(" ", "")
+    if not SMTP_USER or not clean_pwd:
         print("   Status: SMTP credentials not set in environment (Mock mode active).")
         print("   Config: Set SMTP_USER & SMTP_PASSWORD in .env to send real emails via Gmail/SendGrid/SES.\n")
         return
@@ -45,13 +47,35 @@ def _send_email_thread(to_email: str, subject: str, html_body: str, text_body: s
 
         msg.attach(MIMEText(text_body or "EventLedger Notification", "plain"))
         msg.attach(MIMEText(html_body, "html"))
+        msg_str = msg.as_string()
 
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as server:
-            server.starttls()
-            server.login(SMTP_USER, SMTP_PASSWORD)
-            server.sendmail(EMAILS_FROM_ADDRESS, [to_email], msg.as_string())
-        
-        print("   Status: Real email delivered successfully via SMTP! ✅\n")
+        delivered = False
+
+        # Attempt 1: Port 465 SSL (Most reliable on Render & Linux Cloud instances)
+        try:
+            with smtplib.SMTP_SSL(SMTP_HOST, 465, timeout=10) as server:
+                server.login(SMTP_USER, clean_pwd)
+                server.sendmail(EMAILS_FROM_ADDRESS, [to_email], msg_str)
+                delivered = True
+                print("   Status: Real email delivered successfully via SSL Port 465! ✅\n")
+        except Exception as err465:
+            print(f"   Port 465 SSL note: {err465}")
+
+        # Attempt 2: Port 587 TLS fallback
+        if not delivered:
+            try:
+                with smtplib.SMTP(SMTP_HOST, 587, timeout=10) as server:
+                    server.starttls()
+                    server.login(SMTP_USER, clean_pwd)
+                    server.sendmail(EMAILS_FROM_ADDRESS, [to_email], msg_str)
+                    delivered = True
+                    print("   Status: Real email delivered successfully via TLS Port 587! ✅\n")
+            except Exception as err587:
+                print(f"   Port 587 TLS note: {err587}")
+
+        if not delivered:
+            print(f"   Error: Could not deliver email to {to_email} over port 465 or 587.\n")
+
     except Exception as err:
         print(f"   Error delivering SMTP email to {to_email}: {err}\n")
 
