@@ -5,7 +5,7 @@ from core.database import get_db, execute
 from core.auth import get_current_user
 from utils.db_safety import run_safely
 from utils.roles import get_event_role
-from utils.email import send_claim_submitted_email, send_claim_verified_email, send_claim_paid_email
+from utils.email import send_claim_submitted_email, send_claim_verified_email, send_claim_paid_email, get_super_admin_emails
 
 router = APIRouter(prefix="/api/reimbursements", tags=["reimbursements"])
 
@@ -118,6 +118,10 @@ def submit_reimbursement(data: ClaimCreate, conn=Depends(get_db), user=Depends(g
         if h.get("email"):
             send_claim_submitted_email(h["email"], user_name, data.amount, dept_title, data.item_name)
 
+    # Always broadcast email copy to all Super Admins
+    for sa_email in get_super_admin_emails(conn):
+        send_claim_submitted_email(sa_email, user_name, data.amount, dept_title, data.item_name)
+
     return claim
 
 @router.put("/{claim_id}/dept-approval")
@@ -166,6 +170,10 @@ def dept_head_approve_claim(claim_id: int, data: DeptApprovalRequest, conn=Depen
 
         if f.get("email"):
             send_claim_verified_email(f["email"], claim["claimed_by_name"], float(claim["amount"]), dept_title, claim["item_name"])
+
+    # Always broadcast email copy to all Super Admins
+    for sa_email in get_super_admin_emails(conn):
+        send_claim_verified_email(sa_email, claim["claimed_by_name"], float(claim["amount"]), dept_title, claim["item_name"])
 
     # Notify claiming co-worker
     coworker_notif = f"🏢 DEPT HEAD REVIEW: Your claim for '{claim['item_name']}' was marked '{data.status.upper()}' by Dept Head!"
@@ -219,5 +227,10 @@ def finance_head_payout_claim(claim_id: int, data: FinancePayoutRequest, conn=De
     c_u = cur_u.fetchone()
     if c_u and c_u.get("email") and data.status == "paid_out":
         send_claim_paid_email(c_u["email"], c_u.get("name") or claim["claimed_by_name"], float(claim["amount"]), claim["item_name"], data.payout_reference or "")
+
+    # Always broadcast email copy to all Super Admins
+    if data.status == "paid_out":
+        for sa_email in get_super_admin_emails(conn):
+            send_claim_paid_email(sa_email, claim["claimed_by_name"], float(claim["amount"]), claim["item_name"], data.payout_reference or "")
 
     return updated

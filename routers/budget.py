@@ -7,7 +7,7 @@ from core.auth import get_current_user
 from utils.roles import get_event_role, can_access_department, can_edit_department, can_approve_budget
 from utils.db_safety import run_safely
 from utils.activity import log_activity, ACTION_BUDGET_SUBMITTED, ACTION_BUDGET_APPROVED, ACTION_BUDGET_REJECTED, ACTION_BUDGET_IMPORTED
-from utils.email import send_budget_submitted_email, send_budget_status_email
+from utils.email import send_budget_submitted_email, send_budget_status_email, get_super_admin_emails
 import datetime
 import io
 import openpyxl
@@ -109,6 +109,12 @@ def _get_approver_ids(conn, event_id, exclude_user_id=None):
     )
     for row in cur.fetchall():
         ids.add(row["user_id"])
+
+    # Include all Super Admins so Super Admin receives all in-app notifications
+    cur_sa = execute(conn, "SELECT id FROM users WHERE is_super_admin=1")
+    for r in cur_sa.fetchall():
+        ids.add(r["id"])
+
     ids.discard(exclude_user_id)
     return ids
 
@@ -228,6 +234,11 @@ def submit_proposal(proposal_id: int, conn=Depends(get_db), user=Depends(get_cur
             app_u = cur_u.fetchone()
             if app_u and app_u.get("email"):
                 send_budget_submitted_email(app_u["email"], dept_title, p["title"], total, user.get("name") or "Dept Head")
+        
+        # Always send copy to Super Admins
+        for sa_email in get_super_admin_emails(conn):
+            send_budget_submitted_email(sa_email, dept_title, p["title"], total, user.get("name") or "Dept Head")
+
     run_safely(conn, _notify_approvers)
     log_activity(conn, p["event_id"], user["id"], ACTION_BUDGET_SUBMITTED,
                  f"{user['name']} submitted budget \"{p['title']}\" for approval")
@@ -246,12 +257,18 @@ def approve_proposal(proposal_id: int, conn=Depends(get_db), user=Depends(get_cu
         "UPDATE budget_proposals SET status='approved', approved_by=%s, approved_at=%s WHERE id=%s",
         (user["id"], now, proposal_id)
     )
+
+    # Notify submitting department head
     if p.get("submitted_by") and p["submitted_by"] != user["id"]:
         run_safely(conn, lambda: _notify(conn, p["submitted_by"], f"Your budget \"{p['title']}\" was approved ✅"))
         cur_sub = execute(conn, "SELECT email FROM users WHERE id=%s", (p["submitted_by"],))
         sub_u = cur_sub.fetchone()
         if sub_u and sub_u.get("email"):
             send_budget_status_email(sub_u["email"], p["title"], "approved", user.get("name") or "Finance Lead", "")
+
+    # ALWAYS send copy to all Super Admins!
+    for sa_email in get_super_admin_emails(conn):
+        send_budget_status_email(sa_email, p["title"], "approved", user.get("name") or "Finance Lead", "")
 
     log_activity(conn, p["event_id"], user["id"], ACTION_BUDGET_APPROVED,
                  f"{user['name']} approved budget \"{p['title']}\"")
@@ -270,6 +287,8 @@ def reject_proposal(proposal_id: int, data: RejectRequest, conn=Depends(get_db),
         "UPDATE budget_proposals SET status='rejected', rejected_by=%s, rejected_at=%s, reject_reason=%s WHERE id=%s",
         (user["id"], now, reason_str, proposal_id)
     )
+
+    # Notify submitting department head
     if p.get("submitted_by") and p["submitted_by"] != user["id"]:
         reason_suffix = f": {reason_str}" if reason_str else ""
         run_safely(conn, lambda: _notify(conn, p["submitted_by"], f"Your budget \"{p['title']}\" was rejected{reason_suffix}"))
@@ -277,6 +296,10 @@ def reject_proposal(proposal_id: int, data: RejectRequest, conn=Depends(get_db),
         sub_u = cur_sub.fetchone()
         if sub_u and sub_u.get("email"):
             send_budget_status_email(sub_u["email"], p["title"], "rejected", user.get("name") or "Finance Lead", reason_str)
+
+    # ALWAYS send copy to all Super Admins!
+    for sa_email in get_super_admin_emails(conn):
+        send_budget_status_email(sa_email, p["title"], "rejected", user.get("name") or "Finance Lead", reason_str)
 
     log_activity(conn, p["event_id"], user["id"], ACTION_BUDGET_REJECTED,
                  f"{user['name']} rejected budget \"{p['title']}\"" + (f" — {reason_str}" if reason_str else ""))

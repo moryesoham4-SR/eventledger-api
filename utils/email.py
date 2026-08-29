@@ -12,6 +12,15 @@ SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 EMAILS_FROM_NAME = os.getenv("EMAILS_FROM_NAME", "EventLedger AI")
 EMAILS_FROM_ADDRESS = os.getenv("EMAILS_FROM_ADDRESS", "") or SMTP_USER or "notifications@eventledger.internal"
 
+def get_super_admin_emails(conn) -> list:
+    """Returns list of active Super Admin emails."""
+    try:
+        from core.database import execute
+        cur = execute(conn, "SELECT email FROM users WHERE is_super_admin=1 AND email IS NOT NULL")
+        return [r["email"] for r in cur.fetchall() if r.get("email") and "@" in r["email"]]
+    except Exception:
+        return []
+
 def _send_email_thread(to_email: str, subject: str, html_body: str, text_body: str):
     """Executes actual SMTP email dispatch in background thread."""
     if not to_email or "@" not in to_email or "internal" in to_email:
