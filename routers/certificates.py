@@ -27,15 +27,17 @@ def generate_certificate_payload(data: CertificateRequest, conn=Depends(get_db),
         raise HTTPException(status_code=403, detail="You don't have access to this event")
 
     # Fetch event info safely using correct DB column 'name'
-    cur_e = execute(conn, "SELECT name, start_date FROM events WHERE id=%s", (data.event_id,))
-    event_info = cur_e.fetchone()
-    if not event_info:
-        event_name = "Event Fest 2026"
-        start_date = "2026"
-    else:
-        event_name = event_info.get("name") or "Event Fest 2026"
-        start_date = event_info.get("start_date") or "2026"
+    cur_e = execute(conn, "SELECT name, start_date, certificates_enabled FROM events WHERE id=%s", (data.event_id,))
+    event_info = cur_e.fetchone() or {}
 
+    is_admin = role_ctx["level"] in ("co_leader", "event_admin") or bool(user.get("is_super_admin"))
+    certificates_enabled = bool(event_info.get("certificates_enabled"))
+
+    if not certificates_enabled and not is_admin:
+        raise HTTPException(status_code=403, detail="Certificate downloads have not been unlocked by the Event Director yet.")
+
+    event_name = event_info.get("name") or "Event Fest 2026"
+    start_date = event_info.get("start_date") or "2026"
     issue_date = data.issue_date or start_date
 
     return {

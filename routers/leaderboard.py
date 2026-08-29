@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from core.database import get_db, execute
 from core.auth import get_current_user
 from utils.roles import get_event_role
@@ -13,6 +14,22 @@ def Number(val):
     except:
         return 0
 
+def ensure_certificates_schema(conn):
+    run_safely(conn, lambda: execute(conn, "ALTER TABLE events ADD COLUMN certificates_enabled BOOLEAN DEFAULT FALSE"))
+
+class ToggleCertificatesRequest(BaseModel):
+    enabled: bool
+
+@router.post("/{event_id}/toggle-certificates")
+def toggle_certificate_issuance(event_id: int, data: ToggleCertificatesRequest, conn=Depends(get_db), user=Depends(get_current_user)):
+    role_ctx = get_event_role(conn, user, event_id)
+    if not (role_ctx["level"] in ("co_leader", "event_admin") or user.get("is_super_admin")):
+        raise HTTPException(status_code=403, detail="Only Event Lead and Co-Leader can toggle certificate downloads")
+
+    ensure_certificates_schema(conn)
+    execute(conn, "UPDATE events SET certificates_enabled=%s WHERE id=%s", (data.enabled, event_id))
+    return {"ok": True, "certificates_enabled": data.enabled}
+
 @router.get("/")
 def get_event_leaderboard(event_id: int, conn=Depends(get_db), user=Depends(get_current_user)):
     role_ctx = get_event_role(conn, user, event_id)
@@ -20,6 +37,11 @@ def get_event_leaderboard(event_id: int, conn=Depends(get_db), user=Depends(get_
         raise HTTPException(status_code=403, detail="You don't have access to this event")
 
     ensure_reimbursements_schema(conn)
+    ensure_certificates_schema(conn)
+
+    cur_e_info = execute(conn, "SELECT certificates_enabled FROM events WHERE id=%s", (event_id,))
+    e_row = cur_e_info.fetchone()
+    certificates_enabled = bool(e_row.get("certificates_enabled")) if e_row else False
 
     # Fetch departments
     try:
@@ -59,68 +81,60 @@ def get_event_leaderboard(event_id: int, conn=Depends(get_db), user=Depends(get_
     # Fetch reimbursement claims safely
     claims_by_dept = {}
     try:
-        cur_r = execute(conn, """
-            SELECT department_id, COUNT(*) as total_claims,
-                   SUM(CASE WHEN dept_head_status='approved' THEN 1 ELSE 0 END) as approved_claims
-            FROM expense_reimbursements WHERE event_id=%s GROUP BY department_id
-        """, (event_id,))
-        for r in cur_r.fetchall():
+        cur_c = execute(conn, "SELECT department_id, COUNT(*) as total_claims, SUM(CASE WHEN finance_status='paid_out' THEN 1 ELSE 0 END) as paid_claims FROM expense_reimbursements WHERE event_id=%s GROUP BY department_id", (event_id,))
+        for r in cur_c.fetchall():
             if r["department_id"]:
-                claims_by_dept[r["department_id"]] = dict(r)
+                claims_by_dept[r["department_id"]] = {
+                    "total": Number(r["total_claims"]),
+                    "paid": Number(r["paid_claims"])
+                }
     except Exception:
         claims_by_dept = {}
 
+    # Calculate Efficiency XP Score for each department
     dept_leaderboard = []
-
     for d in departments:
-        did = d["id"]
-        d_tasks = [t for t in tasks if Number(t.get("department_id")) == did]
-        total_tasks = len(d_tasks)
-        completed_tasks = sum(1 for t in d_tasks if t.get("status") == "completed")
-        task_completion_pct = round((completed_tasks / total_tasks * 100) if total_tasks > 0 else 100.0, 1)
+        dept_id = d["id"]
+        d_tasks = [t for t in tasks if Number(t.get("department_id")) == dept_id]
+        total_t = len(d_tasks)
+        completed_t = sum(1 for t in d_tasks if t.get("status") == "completed")
+        task_completion_pct = round((completed_t / total_t * 100) if total_t > 0 else 100)
 
-        allocated = budget_by_dept.get(did, 0.0)
-        spent = expenses_by_dept.get(did, 0.0)
-        if allocated > 0:
-            variance_pct = ((allocated - spent) / allocated) * 100
-            budget_efficiency = max(0.0, min(100.0, 100.0 + variance_pct))
+        allocated_b = budget_by_dept.get(dept_id, 0)
+        spent_e = expenses_by_dept.get(dept_id, 0)
+        if allocated_b > 0:
+            budget_eff_pct = round(max(0, min(100, (1 - (spent_e / allocated_b)) * 100 + 50)))
         else:
-            budget_efficiency = 100.0 if spent == 0 else 50.0
+            budget_eff_pct = 100
 
-        c_info = claims_by_dept.get(did, {"total_claims": 0, "approved_claims": 0})
-        t_claims = c_info.get("total_claims", 0)
-        a_claims = c_info.get("approved_claims", 0)
-        reimbursement_pct = round((a_claims / t_claims * 100) if t_claims > 0 else 100.0, 1)
+        c_info = claims_by_dept.get(dept_id, {"total": 0, "paid": 0})
+        reimbursement_compliance_pct = round((c_info["paid"] / c_info["total"] * 100) if c_info["total"] > 0 else 100)
 
-        # Efficiency Score formula (0-100 XP)
-        xp_score = round((task_completion_pct * 0.5) + (budget_efficiency * 0.3) + (reimbursement_pct * 0.2), 1)
+        xp_score = round((task_completion_pct * 0.5) + (budget_eff_pct * 0.3) + (reimbursement_compliance_pct * 0.2))
 
         dept_leaderboard.append({
-            "dept_id": did,
+            "dept_id": dept_id,
             "dept_name": d["name"],
-            "head_name": d.get("head_name") or "Unassigned",
-            "color": d.get("color") or "#6366f1",
-            "xp_score": xp_score,
-            "total_tasks": total_tasks,
-            "completed_tasks": completed_tasks,
+            "head_name": d["head_name"] or "Unassigned",
+            "color": d["color"] or "#6366f1",
+            "completed_tasks": completed_t,
+            "total_tasks": total_t,
             "task_completion_pct": task_completion_pct,
-            "allocated_budget": allocated,
-            "actual_spent": spent,
-            "budget_efficiency": round(budget_efficiency, 1),
-            "reimbursement_compliance": reimbursement_pct,
+            "budget_allocated": allocated_b,
+            "actual_spent": spent_e,
+            "budget_efficiency": budget_eff_pct,
+            "xp_score": xp_score,
         })
 
     dept_leaderboard.sort(key=lambda x: x["xp_score"], reverse=True)
 
-    # Assign ranks & badges
-    for idx, d in enumerate(dept_leaderboard):
-        d["rank"] = idx + 1
-        d["badge"] = "🥇 Gold" if idx == 0 else "🥈 Silver" if idx == 1 else "🥉 Bronze" if idx == 2 else f"#{idx + 1}"
+    for i, d in enumerate(dept_leaderboard):
+        d["rank"] = i + 1
+        d["badge"] = "🥇 1st" if i == 0 else "🥈 2nd" if i == 1 else "🥉 3rd" if i == 2 else f"#{i+1}"
 
-    # Fetch team volunteer & department roster
+    # Fetch Active Volunteers / Team Members
     volunteers = []
     seen_names = set()
-
     try:
         cur_v = execute(conn, """
             SELECT u.id, u.name, u.email, u.avatar_color, r.role, r.dept_id, d.name as dept_name
@@ -128,12 +142,13 @@ def get_event_leaderboard(event_id: int, conn=Depends(get_db), user=Depends(get_
             JOIN users u ON u.id = r.user_id
             LEFT JOIN departments d ON d.id = r.dept_id
             WHERE r.event_id = %s
+            ORDER BY u.name
         """, (event_id,))
         for r in cur_v.fetchall():
-            row_dict = dict(r)
-            name_val = row_dict.get("name") or row_dict.get("email") or ""
-            seen_names.add(name_val.lower().strip())
-            volunteers.append(row_dict)
+            row = dict(r)
+            v_name = (row.get("name") or row.get("email") or "").strip()
+            seen_names.add(v_name.lower())
+            volunteers.append(row)
     except Exception:
         volunteers = []
 
@@ -175,6 +190,7 @@ def get_event_leaderboard(event_id: int, conn=Depends(get_db), user=Depends(get_
 
     return {
         "event_id": event_id,
+        "certificates_enabled": certificates_enabled,
         "departments": dept_leaderboard,
         "volunteers": volunteers,
     }
