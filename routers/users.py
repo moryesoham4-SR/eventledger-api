@@ -180,20 +180,26 @@ def invite_member(data: InviteMemberRequest, conn=Depends(get_db), user=Depends(
 
 @router.get("/")
 def get_users(event_id: Optional[int] = None, conn=Depends(get_db), user=Depends(get_current_user)):
-    _require_super_admin(user)
+    if not user.get("is_super_admin"):
+        if event_id:
+            role_ctx = get_event_role(conn, user, event_id)
+            if not (role_ctx["level"] in ("co_leader", "event_admin") or is_event_owner_or_super_admin(conn, user, event_id)):
+                raise HTTPException(status_code=403, detail="Only Event Admins and Co-Leaders can view users")
+        else:
+            raise HTTPException(status_code=403, detail="Super Admin only")
+
     if event_id:
         cur = execute(conn, """
-            SELECT u.id, u.name, u.email, COALESCE(r.role, u.role) as role, r.dept_id, d.name as dept_name, u.is_super_admin, u.org_name, u.avatar_color, u.is_active, u.created_at
+            SELECT DISTINCT u.id, u.name, u.email, COALESCE(r.role, u.role) as role, r.dept_id, d.name as dept_name, u.is_super_admin, u.org_name, u.avatar_color, u.is_active, u.created_at
             FROM users u
             LEFT JOIN user_event_roles r ON r.user_id = u.id AND r.event_id = %s
             LEFT JOIN departments d ON d.id = r.dept_id
-            WHERE u.org_name = %s
+            WHERE r.event_id = %s OR u.id = %s OR (u.org_name IS NOT NULL AND u.org_name != '' AND u.org_name = %s)
             ORDER BY u.name
-        """, (event_id, user.get("org_name") or ""))
+        """, (event_id, event_id, user["id"], user.get("org_name") or ""))
     else:
         cur = execute(conn,
-            "SELECT id,name,email,role,is_super_admin,org_name,avatar_color,is_active,created_at FROM users WHERE org_name=%s ORDER BY name",
-            (user.get("org_name") or "",)
+            "SELECT id,name,email,role,is_super_admin,org_name,avatar_color,is_active,created_at FROM users ORDER BY name"
         )
     return [dict(r) for r in cur.fetchall()]
 
@@ -214,7 +220,8 @@ def get_event_users(event_id: int, conn=Depends(get_db), user=Depends(get_curren
 @router.post("/assign-role")
 def assign_role(data: RoleAssign, conn=Depends(get_db), user=Depends(get_current_user)):
     if data.event_id is not None:
-        if not is_event_owner_or_super_admin(conn, user, data.event_id):
+        role_ctx = get_event_role(conn, user, data.event_id)
+        if not (role_ctx["level"] in ("co_leader", "event_admin") or is_event_owner_or_super_admin(conn, user, data.event_id)):
             raise HTTPException(status_code=403, detail="Only this event's admin can assign roles on it")
     else:
         _require_super_admin(user)
@@ -251,7 +258,14 @@ def reset_password(data: PasswordReset, conn=Depends(get_db), user=Depends(get_c
 
 @router.get("/audit-log")
 def get_audit_log(event_id: Optional[int] = None, limit: int = 100, conn=Depends(get_db), user=Depends(get_current_user)):
-    _require_super_admin(user)
+    if not user.get("is_super_admin"):
+        if event_id:
+            role_ctx = get_event_role(conn, user, event_id)
+            if not (role_ctx["level"] in ("co_leader", "event_admin") or is_event_owner_or_super_admin(conn, user, event_id)):
+                raise HTTPException(status_code=403, detail="Super Admin or Event Admin only")
+        else:
+            raise HTTPException(status_code=403, detail="Super Admin only")
+            
     if event_id:
         cur = execute(conn,
             """SELECT l.*,u.name as user_name FROM audit_log l
