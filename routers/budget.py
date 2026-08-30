@@ -156,11 +156,7 @@ def get_proposals(event_id: int, conn=Depends(get_db), user=Depends(get_current_
     for p in visible:
         try:
             cur_items = execute(conn, "SELECT * FROM budget_line_items WHERE proposal_id=%s ORDER BY id", (p["id"],))
-            items = [dict(r) for r in cur_items.fetchall()]
-            for item in items:
-                item["estimated_cost"] = float(item.get("unit_price") or 0)
-                item["total_cost"] = float(item.get("total_amount") or 0)
-            p["line_items"] = items
+            p["line_items"] = [dict(r) for r in cur_items.fetchall()]
         except Exception:
             p["line_items"] = []
 
@@ -198,20 +194,14 @@ def get_proposal_detail(proposal_id: int, conn=Depends(get_db), user=Depends(get
         raise HTTPException(status_code=403, detail="You don't have access to this budget proposal")
 
     cur = execute(conn,
-        """SELECT p.*, d.name as dept_name,
-                  (SELECT COALESCE(SUM(total_amount), 0) FROM budget_line_items WHERE proposal_id = p.id) as total_amount
-           FROM budget_proposals p
+        """SELECT p.*, d.name as dept_name FROM budget_proposals p
            LEFT JOIN departments d ON d.id=p.department_id WHERE p.id=%s""",
         (proposal_id,)
     )
     result = dict(cur.fetchone())
     try:
-        cur2 = execute(conn, "SELECT * FROM budget_line_items WHERE proposal_id=%s ORDER BY id", (proposal_id,))
-        items = [dict(r) for r in cur2.fetchall()]
-        for item in items:
-            item["estimated_cost"] = float(item.get("unit_price") or 0)
-            item["total_cost"] = float(item.get("total_amount") or 0)
-        result["line_items"] = items
+        cur2 = execute(conn, "SELECT * FROM budget_line_items WHERE proposal_id=%s", (proposal_id,))
+        result["line_items"] = [dict(r) for r in cur2.fetchall()]
     except Exception:
         result["line_items"] = []
     return result
@@ -236,21 +226,25 @@ def submit_proposal(proposal_id: int, conn=Depends(get_db), user=Depends(get_cur
     )
 
     def _notify_approvers():
-        cur = execute(conn, "SELECT d.name AS dept_name, e.name AS event_name FROM departments d JOIN events e ON e.id=d.event_id WHERE d.id=%s", (p["department_id"],))
-        ctx = cur.fetchone()
-        dept_title = ctx['dept_name'] if ctx else "Department"
-        for uid in _get_approver_ids(conn, p["event_id"], exclude_user_id=user["id"]):
-            _notify(conn, uid, f"New budget \"{p['title']}\" from {dept_title} needs your approval — {ctx['event_name'] if ctx else ''}")
-            cur_u = execute(conn, "SELECT email FROM users WHERE id=%s", (uid,))
-            app_u = cur_u.fetchone()
-            if app_u and app_u.get("email"):
-                send_budget_submitted_email(app_u["email"], dept_title, p["title"], total, user.get("name") or "Dept Head")
-        
-        # Always send copy to Super Admins
-        for sa_email in get_super_admin_emails(conn):
-            send_budget_submitted_email(sa_email, dept_title, p["title"], total, user.get("name") or "Dept Head")
+        try:
+            cur = execute(conn, "SELECT d.name AS dept_name, e.name AS event_name FROM departments d JOIN events e ON e.id=d.event_id WHERE d.id=%s", (p["department_id"],))
+            ctx = cur.fetchone()
+            dept_title = ctx['dept_name'] if ctx else "Department"
+            for uid in _get_approver_ids(conn, p["event_id"], exclude_user_id=user["id"]):
+                _notify(conn, uid, f"New budget \"{p['title']}\" from {dept_title} needs your approval — {ctx['event_name'] if ctx else ''}")
+                cur_u = execute(conn, "SELECT email FROM users WHERE id=%s", (uid,))
+                app_u = cur_u.fetchone()
+                if app_u and app_u.get("email"):
+                    send_budget_submitted_email(app_u["email"], dept_title, p["title"], total, user.get("name") or "Dept Head")
+            
+            for sa_email in get_super_admin_emails(conn):
+                send_budget_submitted_email(sa_email, dept_title, p["title"], total, user.get("name") or "Dept Head")
+        except Exception as e:
+            print("Background notification note:", e)
 
-    run_safely(conn, _notify_approvers)
+    import threading
+    threading.Thread(target=_notify_approvers, daemon=True).start()
+
     log_activity(conn, p["event_id"], user["id"], ACTION_BUDGET_SUBMITTED,
                  f"{user['name']} submitted budget \"{p['title']}\" for approval")
 
@@ -269,17 +263,22 @@ def approve_proposal(proposal_id: int, conn=Depends(get_db), user=Depends(get_cu
         (user["id"], now, proposal_id)
     )
 
-    # Notify submitting department head
-    if p.get("submitted_by") and p["submitted_by"] != user["id"]:
-        run_safely(conn, lambda: _notify(conn, p["submitted_by"], f"Your budget \"{p['title']}\" was approved ✅"))
-        cur_sub = execute(conn, "SELECT email FROM users WHERE id=%s", (p["submitted_by"],))
-        sub_u = cur_sub.fetchone()
-        if sub_u and sub_u.get("email"):
-            send_budget_status_email(sub_u["email"], p["title"], "approved", user.get("name") or "Finance Lead", "")
+    def _notify_approved():
+        try:
+            if p.get("submitted_by") and p["submitted_by"] != user["id"]:
+                _notify(conn, p["submitted_by"], f"Your budget \"{p['title']}\" was approved ✅")
+                cur_sub = execute(conn, "SELECT email FROM users WHERE id=%s", (p["submitted_by"],))
+                sub_u = cur_sub.fetchone()
+                if sub_u and sub_u.get("email"):
+                    send_budget_status_email(sub_u["email"], p["title"], "approved", user.get("name") or "Finance Lead", "")
 
-    # ALWAYS send copy to all Super Admins!
-    for sa_email in get_super_admin_emails(conn):
-        send_budget_status_email(sa_email, p["title"], "approved", user.get("name") or "Finance Lead", "")
+            for sa_email in get_super_admin_emails(conn):
+                send_budget_status_email(sa_email, p["title"], "approved", user.get("name") or "Finance Lead", "")
+        except Exception as e:
+            print("Background notification note:", e)
+
+    import threading
+    threading.Thread(target=_notify_approved, daemon=True).start()
 
     log_activity(conn, p["event_id"], user["id"], ACTION_BUDGET_APPROVED,
                  f"{user['name']} approved budget \"{p['title']}\"")
@@ -302,18 +301,23 @@ def reject_proposal(proposal_id: int, data: RejectRequest, conn=Depends(get_db),
         (user["id"], now, reason_str, proposal_id)
     )
 
-    # Notify submitting department head
-    if p.get("submitted_by") and p["submitted_by"] != user["id"]:
-        reason_suffix = f": {reason_str}" if reason_str else ""
-        run_safely(conn, lambda: _notify(conn, p["submitted_by"], f"Your budget \"{p['title']}\" was rejected{reason_suffix}"))
-        cur_sub = execute(conn, "SELECT email FROM users WHERE id=%s", (p["submitted_by"],))
-        sub_u = cur_sub.fetchone()
-        if sub_u and sub_u.get("email"):
-            send_budget_status_email(sub_u["email"], p["title"], "rejected", user.get("name") or "Finance Lead", reason_str)
+    def _notify_rejected():
+        try:
+            if p.get("submitted_by") and p["submitted_by"] != user["id"]:
+                reason_suffix = f": {reason_str}" if reason_str else ""
+                _notify(conn, p["submitted_by"], f"Your budget \"{p['title']}\" was rejected{reason_suffix}")
+                cur_sub = execute(conn, "SELECT email FROM users WHERE id=%s", (p["submitted_by"],))
+                sub_u = cur_sub.fetchone()
+                if sub_u and sub_u.get("email"):
+                    send_budget_status_email(sub_u["email"], p["title"], "rejected", user.get("name") or "Finance Lead", reason_str)
 
-    # ALWAYS send copy to all Super Admins!
-    for sa_email in get_super_admin_emails(conn):
-        send_budget_status_email(sa_email, p["title"], "rejected", user.get("name") or "Finance Lead", reason_str)
+            for sa_email in get_super_admin_emails(conn):
+                send_budget_status_email(sa_email, p["title"], "rejected", user.get("name") or "Finance Lead", reason_str)
+        except Exception as e:
+            print("Background notification note:", e)
+
+    import threading
+    threading.Thread(target=_notify_rejected, daemon=True).start()
 
     log_activity(conn, p["event_id"], user["id"], ACTION_BUDGET_REJECTED,
                  f"{user['name']} rejected budget \"{p['title']}\"" + (f" — {reason_str}" if reason_str else ""))
