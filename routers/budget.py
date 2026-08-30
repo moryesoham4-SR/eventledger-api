@@ -33,8 +33,9 @@ class LineItemCreate(BaseModel):
     description: Optional[str] = ""
     quantity: float = 1
     unit: str = "unit"
-    unit_price: float
-    total_amount: float
+    unit_price: Optional[float] = 0
+    estimated_cost: Optional[float] = 0
+    total_amount: Optional[float] = 0
 
 class RejectRequest(BaseModel):
     reason: str
@@ -155,7 +156,11 @@ def get_proposals(event_id: int, conn=Depends(get_db), user=Depends(get_current_
     for p in visible:
         try:
             cur_items = execute(conn, "SELECT * FROM budget_line_items WHERE proposal_id=%s ORDER BY id", (p["id"],))
-            p["line_items"] = [dict(r) for r in cur_items.fetchall()]
+            items = [dict(r) for r in cur_items.fetchall()]
+            for item in items:
+                item["estimated_cost"] = float(item.get("unit_price") or 0)
+                item["total_cost"] = float(item.get("total_amount") or 0)
+            p["line_items"] = items
         except Exception:
             p["line_items"] = []
 
@@ -193,14 +198,20 @@ def get_proposal_detail(proposal_id: int, conn=Depends(get_db), user=Depends(get
         raise HTTPException(status_code=403, detail="You don't have access to this budget proposal")
 
     cur = execute(conn,
-        """SELECT p.*, d.name as dept_name FROM budget_proposals p
+        """SELECT p.*, d.name as dept_name,
+                  (SELECT COALESCE(SUM(total_amount), 0) FROM budget_line_items WHERE proposal_id = p.id) as total_amount
+           FROM budget_proposals p
            LEFT JOIN departments d ON d.id=p.department_id WHERE p.id=%s""",
         (proposal_id,)
     )
     result = dict(cur.fetchone())
     try:
-        cur2 = execute(conn, "SELECT * FROM budget_line_items WHERE proposal_id=%s", (proposal_id,))
-        result["line_items"] = [dict(r) for r in cur2.fetchall()]
+        cur2 = execute(conn, "SELECT * FROM budget_line_items WHERE proposal_id=%s ORDER BY id", (proposal_id,))
+        items = [dict(r) for r in cur2.fetchall()]
+        for item in items:
+            item["estimated_cost"] = float(item.get("unit_price") or 0)
+            item["total_cost"] = float(item.get("total_amount") or 0)
+        result["line_items"] = items
     except Exception:
         result["line_items"] = []
     return result
@@ -316,13 +327,28 @@ def add_line_item(data: LineItemCreate, conn=Depends(get_db), user=Depends(get_c
     if not can_edit_department(role_ctx, p["department_id"]):
         raise HTTPException(status_code=403, detail="You can't edit this budget proposal")
 
+    price = float(data.unit_price if (data.unit_price and data.unit_price > 0) else (data.estimated_cost or 0))
+    qty = float(data.quantity or 1)
+    tot = float(data.total_amount if (data.total_amount and data.total_amount > 0) else (qty * price))
+
     cur = execute(conn,
         """INSERT INTO budget_line_items (proposal_id,category,item_name,description,quantity,unit,unit_price,total_amount)
            VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *""",
         (data.proposal_id, data.category, data.item_name, data.description or "",
-         data.quantity, data.unit, data.unit_price, data.total_amount)
+         qty, data.unit, price, tot)
     )
-    return dict(cur.fetchone())
+    row = dict(cur.fetchone())
+
+    # Update proposal total_amount sum
+    execute(conn, """
+        UPDATE budget_proposals
+        SET total_amount = (SELECT COALESCE(SUM(total_amount), 0) FROM budget_line_items WHERE proposal_id = %s)
+        WHERE id = %s
+    """, (data.proposal_id, data.proposal_id))
+
+    row["estimated_cost"] = price
+    row["total_cost"] = tot
+    return row
 
 @router.delete("/line-items/{item_id}")
 def delete_line_item(item_id: int, conn=Depends(get_db), user=Depends(get_current_user)):
@@ -336,4 +362,12 @@ def delete_line_item(item_id: int, conn=Depends(get_db), user=Depends(get_curren
     if not can_edit_department(role_ctx, p["department_id"]):
         raise HTTPException(status_code=403, detail="You can't edit this budget proposal")
     execute(conn, "DELETE FROM budget_line_items WHERE id=%s", (item_id,))
+
+    # Update proposal total_amount sum
+    execute(conn, """
+        UPDATE budget_proposals
+        SET total_amount = (SELECT COALESCE(SUM(total_amount), 0) FROM budget_line_items WHERE proposal_id = %s)
+        WHERE id = %s
+    """, (li["proposal_id"], li["proposal_id"]))
+
     return {"ok": True}
