@@ -18,7 +18,7 @@ class DeptCreate(BaseModel):
 class AssignMemberRequest(BaseModel):
     event_id: int
     user_id: int
-    role: str = "volunteer"  # 'co_leader', 'event_admin', 'dept_head', or 'volunteer'
+    role: str = "volunteer"  # 'co_leader', 'co_head', 'event_admin', 'dept_head', or 'volunteer'
 
 class DemeritPenaltyRequest(BaseModel):
     demerit_points: int
@@ -34,7 +34,20 @@ def get_departments(event_id: int, conn=Depends(get_db), user=Depends(get_curren
     if role_ctx["level"] is None:
         raise HTTPException(status_code=403, detail="You don't have access to this event")
     cur = execute(conn, "SELECT * FROM departments WHERE event_id=%s ORDER BY name", (event_id,))
-    return [dict(r) for r in cur.fetchall()]
+    depts = [dict(r) for r in cur.fetchall()]
+
+    for d in depts:
+        cur_co = execute(conn, """
+            SELECT u.name, u.email, r.role
+            FROM user_event_roles r
+            JOIN users u ON u.id = r.user_id
+            WHERE r.event_id = %s AND r.dept_id = %s AND r.role IN ('co_leader', 'co_head')
+        """, (event_id, d["id"]))
+        leaders = [dict(row) for row in cur_co.fetchall()]
+        d["co_heads"] = [l["name"] or l["email"] for l in leaders]
+        d["co_head_names"] = ", ".join(d["co_heads"]) if d["co_heads"] else ""
+
+    return depts
 
 @router.post("/")
 def create_department(data: DeptCreate, conn=Depends(get_db), user=Depends(get_current_user)):
@@ -44,7 +57,7 @@ def create_department(data: DeptCreate, conn=Depends(get_db), user=Depends(get_c
         raise HTTPException(status_code=403, detail="Only an Event Lead or Admin can create departments")
     cur = execute(conn,
         "INSERT INTO departments (event_id,name,head_name,color) VALUES (%s,%s,%s,%s) RETURNING *",
-        (data.event_id, data.name, data.head_name, data.color)
+        (data.event_id, data.name, data.head_name or "", data.color)
     )
     return dict(cur.fetchone())
 
@@ -109,11 +122,13 @@ def get_department_roster(dept_id: int, conn=Depends(get_db), user=Depends(get_c
     members = [dict(r) for r in cur.fetchall()]
 
     head_user = next((m for m in members if m["role"] == "dept_head"), None)
-    coworkers = [m for m in members if m["role"] != "dept_head"]
+    co_heads = [m for m in members if m["role"] in ("co_leader", "co_head")]
+    coworkers = [m for m in members if m["role"] not in ("dept_head", "co_leader", "co_head")]
 
     return {
         "dept": dict(dept),
         "head": head_user,
+        "co_heads": co_heads,
         "coworkers": coworkers,
         "all_members": members,
     }
@@ -137,6 +152,11 @@ def assign_department_member(dept_id: int, data: AssignMemberRequest, conn=Depen
         """, (data.event_id, dept_id)))
 
         execute(conn, "UPDATE departments SET head_name=%s WHERE id=%s", (target_u["name"], dept_id))
+    elif data.role in ("co_head", "co_leader"):
+        cur_d = execute(conn, "SELECT head_name FROM departments WHERE id=%s", (dept_id,))
+        dept_row = cur_d.fetchone()
+        if not dept_row or not dept_row.get("head_name"):
+            execute(conn, "UPDATE departments SET head_name=%s WHERE id=%s", (f"{target_u['name']} (Co-Head)", dept_id))
 
     execute(conn, """
         INSERT INTO user_event_roles (user_id, event_id, role, dept_id)
