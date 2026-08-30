@@ -4,6 +4,7 @@ from typing import Optional
 from core.database import get_db, execute
 from core.auth import get_current_user
 from utils.roles import get_event_role
+from utils.google_sheets import sync_event_data_to_sheets
 
 router = APIRouter(prefix="/api/income", tags=["income"])
 
@@ -65,13 +66,16 @@ def add_estimated_income(data: EstIncomeCreate, conn=Depends(get_db), user=Depen
         "INSERT INTO estimated_income (event_id,source,category,amount,notes) VALUES (%s,%s,%s,%s,%s) RETURNING *",
         (data.event_id, data.source, data.category, data.amount, data.notes)
     )
-    return dict(cur.fetchone())
+    res = dict(cur.fetchone())
+    sync_event_data_to_sheets(conn, data.event_id, "create", "income", res)
+    return res
 
 @router.delete("/estimated/{item_id}")
 def delete_estimated_income(item_id: int, conn=Depends(get_db), user=Depends(get_current_user)):
     item = _get_income_or_404(conn, "estimated_income", item_id)
     _require_finance(conn, user, item["event_id"])
     execute(conn, "DELETE FROM estimated_income WHERE id=%s", (item_id,))
+    sync_event_data_to_sheets(conn, item["event_id"], "delete", "income", {"id": item_id})
     return {"ok": True}
 
 @router.get("/actual")
@@ -89,11 +93,14 @@ def add_actual_income(data: ActIncomeCreate, conn=Depends(get_db), user=Depends(
         (data.event_id, data.source, data.category, data.amount,
          data.received_on, data.payment_mode, data.reference, data.notes)
     )
-    return dict(cur.fetchone())
+    res = dict(cur.fetchone())
+    sync_event_data_to_sheets(conn, data.event_id, "create", "income", res)
+    return res
 
 @router.delete("/actual/{item_id}")
 def delete_actual_income(item_id: int, conn=Depends(get_db), user=Depends(get_current_user)):
     item = _get_income_or_404(conn, "actual_income", item_id)
     _require_finance(conn, user, item["event_id"])
     execute(conn, "DELETE FROM actual_income WHERE id=%s", (item_id,))
+    sync_event_data_to_sheets(conn, item["event_id"], "delete", "income", {"id": item_id})
     return {"ok": True}

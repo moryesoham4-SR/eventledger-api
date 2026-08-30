@@ -4,6 +4,7 @@ from typing import Optional
 from core.database import get_db, execute
 from core.auth import get_current_user
 from utils.roles import get_event_role, can_access_department, can_edit_department
+from utils.google_sheets import sync_event_data_to_sheets
 
 router = APIRouter(prefix="/api/expenses", tags=["expenses"])
 
@@ -79,7 +80,9 @@ def add_estimated_expense(data: EstExpenseCreate, conn=Depends(get_db), user=Dep
         (data.event_id, data.department_id, data.category, data.item_name,
          data.description, data.quantity, data.unit, data.amount, data.notes)
     )
-    return dict(cur.fetchone())
+    res = dict(cur.fetchone())
+    sync_event_data_to_sheets(conn, data.event_id, "create", "expense", res)
+    return res
 
 @router.delete("/estimated/{item_id}")
 def delete_estimated_expense(item_id: int, conn=Depends(get_db), user=Depends(get_current_user)):
@@ -88,6 +91,7 @@ def delete_estimated_expense(item_id: int, conn=Depends(get_db), user=Depends(ge
     if not can_edit_department(role_ctx, item["department_id"]):
         raise HTTPException(status_code=403, detail="You can't delete this expense")
     execute(conn, "DELETE FROM estimated_expenses WHERE id=%s", (item_id,))
+    sync_event_data_to_sheets(conn, item["event_id"], "delete", "expense", {"id": item_id})
     return {"ok": True}
 
 @router.get("/actual")
@@ -113,7 +117,9 @@ def add_actual_expense(data: ActExpenseCreate, conn=Depends(get_db), user=Depend
          data.quantity, data.unit, data.amount, data.paid_on, data.payment_mode,
          data.status, data.reference, data.notes)
     )
-    return dict(cur.fetchone())
+    res = dict(cur.fetchone())
+    sync_event_data_to_sheets(conn, data.event_id, "create", "expense", res)
+    return res
 
 @router.delete("/actual/{item_id}")
 def delete_actual_expense(item_id: int, conn=Depends(get_db), user=Depends(get_current_user)):
@@ -122,4 +128,5 @@ def delete_actual_expense(item_id: int, conn=Depends(get_db), user=Depends(get_c
     if not can_edit_department(role_ctx, item["department_id"]):
         raise HTTPException(status_code=403, detail="You can't delete this expense")
     execute(conn, "DELETE FROM actual_expenses WHERE id=%s", (item_id,))
+    sync_event_data_to_sheets(conn, item["event_id"], "delete", "expense", {"id": item_id})
     return {"ok": True}
