@@ -16,7 +16,7 @@ def Number(val):
         return 0
 
 def ensure_certificates_schema(conn):
-    run_safely(conn, lambda: execute(conn, "ALTER TABLE events ADD COLUMN certificates_enabled BOOLEAN DEFAULT FALSE"))
+    run_safely(conn, lambda: execute(conn, "ALTER TABLE events ADD COLUMN IF NOT EXISTS certificates_enabled BOOLEAN DEFAULT FALSE"))
 
 class ToggleCertificatesRequest(BaseModel):
     enabled: bool
@@ -69,7 +69,7 @@ def get_event_leaderboard(event_id: int, conn=Depends(get_db), user=Depends(get_
     # Fetch work tasks safely
     tasks = []
     try:
-        cur_t = execute(conn, "SELECT * FROM work_tasks WHERE event_id=%s", (event_id,))
+        cur_t = execute(conn, "SELECT * FROM department_tasks WHERE event_id=%s", (event_id,))
         tasks = [dict(r) for r in cur_t.fetchall()]
     except Exception:
         tasks = []
@@ -87,7 +87,7 @@ def get_event_leaderboard(event_id: int, conn=Depends(get_db), user=Depends(get_
     # Fetch budget items safely
     budget_by_dept = {}
     try:
-        cur_b = execute(conn, "SELECT department_id, SUM(amount) as total_budget FROM budget_proposals WHERE event_id=%s GROUP BY department_id", (event_id,))
+        cur_b = execute(conn, "SELECT department_id, SUM(total_amount) as total_budget FROM budget_proposals WHERE event_id=%s GROUP BY department_id", (event_id,))
         for r in cur_b.fetchall():
             if r["department_id"]:
                 budget_by_dept[r["department_id"]] = float(r["total_budget"] or 0)
@@ -118,6 +118,7 @@ def get_event_leaderboard(event_id: int, conn=Depends(get_db), user=Depends(get_
 
         allocated_b = budget_by_dept.get(dept_id, 0)
         spent_e = expenses_by_dept.get(dept_id, 0)
+
         if allocated_b > 0:
             budget_eff_pct = round(max(0, min(100, (1 - (spent_e / allocated_b)) * 100 + 50)))
         else:
@@ -126,7 +127,8 @@ def get_event_leaderboard(event_id: int, conn=Depends(get_db), user=Depends(get_
         c_info = claims_by_dept.get(dept_id, {"total": 0, "paid": 0})
         reimbursement_compliance_pct = round((c_info["paid"] / c_info["total"] * 100) if c_info["total"] > 0 else 100)
 
-        xp_score = round((task_completion_pct * 0.5) + (budget_eff_pct * 0.3) + (reimbursement_compliance_pct * 0.2))
+        demerit_p = Number(d.get("demerit_points"))
+        xp_score = max(0, round((task_completion_pct * 0.5) + (budget_eff_pct * 0.3) + (reimbursement_compliance_pct * 0.2) - (demerit_p * 5)))
 
         dept_leaderboard.append({
             "dept_id": dept_id,
@@ -139,6 +141,7 @@ def get_event_leaderboard(event_id: int, conn=Depends(get_db), user=Depends(get_
             "budget_allocated": allocated_b,
             "actual_spent": spent_e,
             "budget_efficiency": budget_eff_pct,
+            "demerit_points": demerit_p,
             "xp_score": xp_score,
         })
 

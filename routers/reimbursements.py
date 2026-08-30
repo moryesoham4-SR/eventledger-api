@@ -139,12 +139,16 @@ def dept_head_approve_claim(claim_id: int, data: DeptApprovalRequest, conn=Depen
     if role_ctx["level"] == "dept_head" and str(role_ctx["dept_id"]) != str(claim["department_id"]):
         raise HTTPException(status_code=403, detail="You can only verify claims for your own department")
 
+    notes_str = (data.notes or "").strip()
+    if data.status.lower() == "rejected" and not notes_str:
+        raise HTTPException(status_code=400, detail="A reason for rejecting the reimbursement claim is compulsory.")
+
     cur = execute(conn, """
         UPDATE expense_reimbursements
         SET dept_head_status=%s, dept_head_notes=%s
         WHERE id=%s
         RETURNING *
-    """, (data.status, data.notes, claim_id))
+    """, (data.status, notes_str, claim_id))
     
     updated = dict(cur.fetchone())
 
@@ -196,6 +200,10 @@ def finance_head_payout_claim(claim_id: int, data: FinancePayoutRequest, conn=De
     if role_ctx["level"] not in ("co_leader", "event_admin", "finance_head"):
         raise HTTPException(status_code=403, detail="Only Finance Head or Event Admin can approve final payouts")
 
+    notes_str = (data.notes or "").strip()
+    if data.status.lower() == "rejected" and not notes_str:
+        raise HTTPException(status_code=400, detail="A reason for rejecting the claim payout is compulsory.")
+
     today = "today"
     cur = execute(conn, """
         UPDATE expense_reimbursements
@@ -214,7 +222,7 @@ def finance_head_payout_claim(claim_id: int, data: FinancePayoutRequest, conn=De
             INSERT INTO actual_expenses
             (event_id, department_id, category, item_name, description, quantity, unit, amount, payment_mode, status, reference, notes)
             VALUES (%s, %s, %s, %s, %s, 1, 'unit', %s, %s, 'paid', %s, %s)
-        """, (claim["event_id"], claim["department_id"], claim["category"], claim["item_name"], desc, claim["amount"], data.payment_mode, ref_tag, data.notes)))
+        """, (claim["event_id"], claim["department_id"], claim["category"], claim["item_name"], desc, claim["amount"], data.payment_mode, ref_tag, notes_str)))
 
     # Notify claiming co-worker via DB & Email
     payout_notif = f"💸 FINANCE PAYOUT: Your claim for '{claim['item_name']}' (₹{claim['amount']:,.2f}) was marked '{data.status.upper()}'! Ref: {data.payout_reference or 'N/A'}"

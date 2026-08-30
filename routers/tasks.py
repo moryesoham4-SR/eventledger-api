@@ -6,6 +6,7 @@ from core.auth import get_current_user
 from utils.roles import get_event_role
 from utils.db_safety import run_safely
 from utils.activity import log_activity, ACTION_TASK_ASSIGNED, ACTION_TASK_UPDATED
+import datetime
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
@@ -23,14 +24,22 @@ def ensure_tasks_schema(conn):
             priority VARCHAR(20) DEFAULT 'medium',
             status VARCHAR(20) DEFAULT 'pending',
             created_by INT,
+            created_by_name VARCHAR(255),
+            completed_at VARCHAR(50),
+            incomplete_reason TEXT,
+            demerit_points INT DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
     """))
+    run_safely(conn, lambda: execute(conn, "ALTER TABLE department_tasks ADD COLUMN IF NOT EXISTS created_by_name VARCHAR(255)"))
+    run_safely(conn, lambda: execute(conn, "ALTER TABLE department_tasks ADD COLUMN IF NOT EXISTS completed_at VARCHAR(50)"))
+    run_safely(conn, lambda: execute(conn, "ALTER TABLE department_tasks ADD COLUMN IF NOT EXISTS incomplete_reason TEXT"))
+    run_safely(conn, lambda: execute(conn, "ALTER TABLE department_tasks ADD COLUMN IF NOT EXISTS demerit_points INT DEFAULT 0"))
 
 def is_admin_or_superadmin(user: dict, role_ctx: dict) -> bool:
     if user.get("is_super_admin"):
         return True
-    return role_ctx["level"] == "event_admin"
+    return role_ctx["level"] in ("event_admin", "co_leader")
 
 class TaskCreate(BaseModel):
     event_id: int
@@ -51,6 +60,9 @@ class TaskUpdate(BaseModel):
     deadline: Optional[str] = None
     priority: Optional[str] = None
     status: Optional[str] = None
+    incomplete_reason: Optional[str] = None
+    completed_at: Optional[str] = None
+    demerit_points: Optional[int] = None
 
 @router.get("/")
 def get_tasks(event_id: int, dept_id: Optional[int] = None, conn=Depends(get_db), user=Depends(get_current_user)):
@@ -61,10 +73,12 @@ def get_tasks(event_id: int, dept_id: Optional[int] = None, conn=Depends(get_db)
 
     query = """
         SELECT t.*, d.name as dept_name, d.color as dept_color,
-               u.name as assignee_name, u.email as assignee_email, u.avatar_color as assignee_avatar
+               u.name as assignee_name, u.email as assignee_email, u.avatar_color as assignee_avatar,
+               u_assigner.name as assigner_name
         FROM department_tasks t
         JOIN departments d ON d.id = t.department_id
         LEFT JOIN users u ON u.id = t.assigned_to_user_id
+        LEFT JOIN users u_assigner ON u_assigner.id = t.created_by
         WHERE t.event_id = %s
     """
     params = [event_id]
@@ -82,6 +96,35 @@ def get_tasks(event_id: int, dept_id: Optional[int] = None, conn=Depends(get_db)
     query += " ORDER BY t.created_at DESC"
     cur = execute(conn, query, tuple(params))
     return [dict(r) for r in cur.fetchall()]
+
+@router.get("/audit-report")
+def get_task_audit_report(event_id: int, conn=Depends(get_db), user=Depends(get_current_user)):
+    ensure_tasks_schema(conn)
+    role_ctx = get_event_role(conn, user, event_id)
+    if role_ctx["level"] is None:
+        raise HTTPException(status_code=403, detail="You don't have access to this event")
+
+    query = """
+        SELECT t.*, d.name as dept_name, d.color as dept_color,
+               u_assignee.name as assignee_name, u_assignee.email as assignee_email,
+               u_assigner.name as assigner_name, u_assigner.email as assigner_email
+        FROM department_tasks t
+        JOIN departments d ON d.id = t.department_id
+        LEFT JOIN users u_assignee ON u_assignee.id = t.assigned_to_user_id
+        LEFT JOIN users u_assigner ON u_assigner.id = t.created_by
+        WHERE t.event_id = %s
+        ORDER BY t.created_at DESC
+    """
+    cur = execute(conn, query, (event_id,))
+    rows = [dict(r) for r in cur.fetchall()]
+
+    today_str = datetime.date.today().isoformat()
+    for r in rows:
+        r["assigner_label"] = r.get("assigner_name") or r.get("created_by_name") or "Super Admin / Event Director"
+        r["assignee_label"] = r.get("assignee_name") or r.get("assigned_to_name") or "Unassigned"
+        r["is_overdue"] = bool(r.get("deadline") and r["status"] != "completed" and r["deadline"] < today_str)
+
+    return rows
 
 @router.get("/summary")
 def get_tasks_summary(event_id: int, conn=Depends(get_db), user=Depends(get_current_user)):
@@ -108,7 +151,7 @@ def create_task(data: TaskCreate, conn=Depends(get_db), user=Depends(get_current
     ensure_tasks_schema(conn)
     role_ctx = get_event_role(conn, user, data.event_id)
     
-    # Authority strictly restricted ONLY to Super Admin or Event Admin
+    # Authority strictly restricted ONLY to Super Admin or Event Admin / Co-Leader
     if not is_admin_or_superadmin(user, role_ctx):
         raise HTTPException(status_code=403, detail="Only Super Admin or Event Admin can assign work tasks")
 
@@ -120,14 +163,16 @@ def create_task(data: TaskCreate, conn=Depends(get_db), user=Depends(get_current
         if u_row:
             target_user_id = u_row["id"]
 
+    creator_name = user.get("name") or user.get("email") or "Super Admin"
+
     cur = execute(conn, """
         INSERT INTO department_tasks
-        (event_id, department_id, assigned_to_user_id, assigned_to_name, title, description, deadline, priority, status, created_by)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        (event_id, department_id, assigned_to_user_id, assigned_to_name, title, description, deadline, priority, status, created_by, created_by_name)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING *
     """, (
         data.event_id, data.department_id, target_user_id, data.assigned_to_name,
-        data.title, data.description, data.deadline, data.priority, data.status, user["id"]
+        data.title, data.description, data.deadline, data.priority, data.status, user["id"], creator_name
     ))
     task = dict(cur.fetchone())
 
@@ -136,7 +181,7 @@ def create_task(data: TaskCreate, conn=Depends(get_db), user=Depends(get_current
     assignee_label = data.assigned_to_name or "team member"
     log_activity(conn, data.event_id, user["id"], ACTION_TASK_ASSIGNED, f"{actor_name} assigned work '{data.title}' to {assignee_label}")
 
-    # 2. Dispatch persistent unread notification for target user (will show badge even when logging in later)
+    # 2. Dispatch persistent unread notification for target user
     if target_user_id:
         cur_e = execute(conn, "SELECT name FROM events WHERE id=%s", (data.event_id,))
         ev_row = cur_e.fetchone()
@@ -172,6 +217,19 @@ def update_task(task_id: int, data: TaskUpdate, conn=Depends(get_db), user=Depen
     if not fields:
         raise HTTPException(status_code=400, detail="No fields to update")
 
+    # If status is set to incomplete or overdue, require incomplete_reason
+    today_str = datetime.date.today().isoformat()
+    is_overdue = bool(task.get("deadline") and task["deadline"] < today_str)
+
+    if fields.get("status") == "incomplete" or (is_overdue and fields.get("status") != "completed"):
+        reason = (fields.get("incomplete_reason") or task.get("incomplete_reason") or "").strip()
+        if not reason:
+            raise HTTPException(status_code=400, detail="An explanation why the task is incomplete or delayed is compulsory.")
+
+    # Record completion date
+    if fields.get("status") == "completed" and not fields.get("completed_at"):
+        fields["completed_at"] = datetime.datetime.utcnow().isoformat()
+
     set_clause = ", ".join(f"{k}=%s" for k in fields)
     values = list(fields.values()) + [task_id]
     cur_u = execute(conn, f"UPDATE department_tasks SET {set_clause} WHERE id=%s RETURNING *", values)
@@ -179,10 +237,9 @@ def update_task(task_id: int, data: TaskUpdate, conn=Depends(get_db), user=Depen
 
     if "status" in fields and fields["status"] != task["status"]:
         actor_name = user.get("name") or user.get("email") or "User"
-        status_label = "completed" if fields["status"] == "completed" else "in progress" if fields["status"] == "in_progress" else "pending"
+        status_label = fields["status"]
         log_activity(conn, task["event_id"], user["id"], ACTION_TASK_UPDATED, f"{actor_name} marked task '{task['title']}' as {status_label}")
 
-        # If updated by admin, notify the assigned user
         if task.get("assigned_to_user_id") and task["assigned_to_user_id"] != user["id"]:
             title_str = "🎯 Task Updated"
             msg = f"TASK UPDATE: Task '{task['title']}' was marked as {status_label} by {actor_name}."

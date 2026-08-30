@@ -37,7 +37,7 @@ class LineItemCreate(BaseModel):
     total_amount: float
 
 class RejectRequest(BaseModel):
-    reason: Optional[str] = ""
+    reason: str
 
 def ensure_budget_schema(conn):
     """Ensures budget_proposals and budget_line_items tables and missing columns exist safely."""
@@ -281,8 +281,11 @@ def reject_proposal(proposal_id: int, data: RejectRequest, conn=Depends(get_db),
     if not can_approve_budget(role_ctx):
         raise HTTPException(status_code=403, detail="Only an event admin or finance role can reject budgets")
 
+    reason_str = (data.reason or "").strip()
+    if not reason_str:
+        raise HTTPException(status_code=400, detail="A reason for rejecting the budget proposal is compulsory.")
+
     now = datetime.datetime.utcnow().isoformat()
-    reason_str = data.reason or ""
     execute(conn,
         "UPDATE budget_proposals SET status='rejected', rejected_by=%s, rejected_at=%s, reject_reason=%s WHERE id=%s",
         (user["id"], now, reason_str, proposal_id)
