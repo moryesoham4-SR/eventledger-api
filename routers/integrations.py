@@ -30,19 +30,17 @@ def ensure_integrations_schema(conn):
         )
     """))
 
-def _require_admin_or_super_admin(conn, user, event_id: int):
+def _require_event_access(conn, user, event_id: int):
     if user.get("is_super_admin"):
         return
     role_ctx = get_event_role(conn, user, event_id)
     if role_ctx["level"] is None:
         raise HTTPException(status_code=403, detail="You don't have access to this event")
-    if not (role_ctx["level"] in ("co_leader", "event_admin", "finance_head", "dept_head") or is_event_owner_or_super_admin(conn, user, event_id)):
-        raise HTTPException(status_code=403, detail="Only Event leaders and team members can configure integrations.")
 
 @router.get("/google-sheets")
 def get_google_sheets_config(event_id: int, conn=Depends(get_db), user=Depends(get_current_user)):
     ensure_integrations_schema(conn)
-    _require_admin_or_super_admin(conn, user, event_id)
+    _require_event_access(conn, user, event_id)
 
     cur = execute(conn, "SELECT * FROM event_integrations WHERE event_id=%s", (event_id,))
     row = cur.fetchone()
@@ -58,7 +56,7 @@ def get_google_sheets_config(event_id: int, conn=Depends(get_db), user=Depends(g
 @router.post("/google-sheets")
 def save_google_sheets_config(data: GoogleSheetsConfig, conn=Depends(get_db), user=Depends(get_current_user)):
     ensure_integrations_schema(conn)
-    _require_admin_or_super_admin(conn, user, data.event_id)
+    _require_event_access(conn, user, data.event_id)
 
     clean_url = data.webhook_url.strip()
 
@@ -75,24 +73,25 @@ def save_google_sheets_config(data: GoogleSheetsConfig, conn=Depends(get_db), us
 @router.post("/google-sheets/sync-all")
 def trigger_sync_all(data: SyncAllRequest, conn=Depends(get_db), user=Depends(get_current_user)):
     ensure_integrations_schema(conn)
-    _require_admin_or_super_admin(conn, user, data.event_id)
+    _require_event_access(conn, user, data.event_id)
 
-    # Auto-save webhook_url if provided in sync request
-    if data.webhook_url and data.webhook_url.strip():
-        clean_url = data.webhook_url.strip()
-        execute(conn, """
+    webhook_url = (data.webhook_url or "").strip()
+
+    if webhook_url:
+        run_safely(conn, lambda: execute(conn, """
             INSERT INTO event_integrations (event_id, google_sheets_webhook_url, is_auto_sync_enabled)
             VALUES (%s, %s, TRUE)
             ON CONFLICT (event_id) DO UPDATE SET
                 google_sheets_webhook_url = EXCLUDED.google_sheets_webhook_url
-        """, (data.event_id, clean_url))
+        """, (data.event_id, webhook_url)))
+    else:
+        cur_cfg = execute(conn, "SELECT google_sheets_webhook_url FROM event_integrations WHERE event_id=%s", (data.event_id,))
+        row_cfg = cur_cfg.fetchone()
+        if row_cfg and row_cfg.get("google_sheets_webhook_url"):
+            webhook_url = row_cfg["google_sheets_webhook_url"].strip()
 
-    cur_cfg = execute(conn, "SELECT google_sheets_webhook_url FROM event_integrations WHERE event_id=%s", (data.event_id,))
-    row_cfg = cur_cfg.fetchone()
-    if not row_cfg or not row_cfg.get("google_sheets_webhook_url"):
+    if not webhook_url or not webhook_url.startswith("http"):
         raise HTTPException(status_code=400, detail="Please configure a Google Sheets Webhook URL first.")
-
-    webhook_url = row_cfg["google_sheets_webhook_url"].strip()
 
     # 1. Fetch Event Info
     cur_e = execute(conn, "SELECT name FROM events WHERE id=%s", (data.event_id,))
@@ -155,6 +154,6 @@ def trigger_sync_all(data: SyncAllRequest, conn=Depends(get_db), user=Depends(ge
     # Dispatch via background thread
     threading.Thread(target=_dispatch_http_post, args=(webhook_url, payload), daemon=True).start()
 
-    execute(conn, "UPDATE event_integrations SET last_synced_at=CURRENT_TIMESTAMP WHERE event_id=%s", (data.event_id,))
+    run_safely(conn, lambda: execute(conn, "UPDATE event_integrations SET last_synced_at=CURRENT_TIMESTAMP WHERE event_id=%s", (data.event_id,)))
 
     return {"ok": True, "message": "Full EventLedger auto-sync dispatched to Google Sheets! 📊"}
