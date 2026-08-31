@@ -36,6 +36,18 @@ def _clean_webhook_url(url: str) -> str:
     if not url:
         return ""
     u = url.strip()
+    if not u.startswith("http"):
+        if "script.google.com" in u:
+            u = "https://" + u.lstrip("/")
+        elif u.startswith("AKfy"):
+            u = f"https://script.google.com/macros/s/{u}"
+        elif u.startswith("dfT-"):
+            u = f"https://script.google.com/macros/s/AKfycbyipNRdqLeRN3ttyOK{u}"
+        elif "macros/s/" in u:
+            u = f"https://script.google.com/{u.lstrip('/')}"
+        elif "/exec" in u or len(u) > 30:
+            u = f"https://script.google.com/macros/s/{u}"
+    
     # If it is a script.google.com Web App URL and missing /exec, auto-append /exec
     if "script.google.com/macros/s/" in u and not u.endswith("/exec"):
         u = u.rstrip("/") + "/exec"
