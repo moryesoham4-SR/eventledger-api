@@ -3,7 +3,6 @@ from pydantic import BaseModel
 from typing import Optional
 from core.database import get_db, execute
 from core.auth import get_current_user
-from utils.roles import get_event_role, is_event_owner_or_super_admin
 from utils.db_safety import run_safely
 from utils.google_sheets import GOOGLE_APPS_SCRIPT_TEMPLATE, _dispatch_http_post
 import threading
@@ -30,17 +29,9 @@ def ensure_integrations_schema(conn):
         )
     """))
 
-def _require_event_access(conn, user, event_id: int):
-    if user.get("is_super_admin"):
-        return
-    role_ctx = get_event_role(conn, user, event_id)
-    if role_ctx["level"] is None:
-        raise HTTPException(status_code=403, detail="You don't have access to this event")
-
 @router.get("/google-sheets")
 def get_google_sheets_config(event_id: int, conn=Depends(get_db), user=Depends(get_current_user)):
     ensure_integrations_schema(conn)
-    _require_event_access(conn, user, event_id)
 
     cur = execute(conn, "SELECT * FROM event_integrations WHERE event_id=%s", (event_id,))
     row = cur.fetchone()
@@ -56,7 +47,6 @@ def get_google_sheets_config(event_id: int, conn=Depends(get_db), user=Depends(g
 @router.post("/google-sheets")
 def save_google_sheets_config(data: GoogleSheetsConfig, conn=Depends(get_db), user=Depends(get_current_user)):
     ensure_integrations_schema(conn)
-    _require_event_access(conn, user, data.event_id)
 
     clean_url = data.webhook_url.strip()
 
@@ -73,7 +63,6 @@ def save_google_sheets_config(data: GoogleSheetsConfig, conn=Depends(get_db), us
 @router.post("/google-sheets/sync-all")
 def trigger_sync_all(data: SyncAllRequest, conn=Depends(get_db), user=Depends(get_current_user)):
     ensure_integrations_schema(conn)
-    _require_event_access(conn, user, data.event_id)
 
     webhook_url = (data.webhook_url or "").strip()
 
