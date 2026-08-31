@@ -22,12 +22,39 @@ def ensure_integrations_schema(conn):
     run_safely(conn, lambda: execute(conn, """
         CREATE TABLE IF NOT EXISTS event_integrations (
             id SERIAL PRIMARY KEY,
-            event_id INT NOT NULL UNIQUE,
+            event_id INT NOT NULL,
             google_sheets_webhook_url TEXT DEFAULT '',
             is_auto_sync_enabled BOOLEAN DEFAULT TRUE,
             last_synced_at TIMESTAMP
         )
     """))
+    run_safely(conn, lambda: execute(conn, """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_event_integrations_event_id ON event_integrations (event_id)
+    """))
+
+def _clean_webhook_url(url: str) -> str:
+    if not url:
+        return ""
+    u = url.strip()
+    # If it is a script.google.com Web App URL and missing /exec, auto-append /exec
+    if "script.google.com/macros/s/" in u and not u.endswith("/exec"):
+        u = u.rstrip("/") + "/exec"
+    return u
+
+def _upsert_webhook_url(conn, event_id: int, webhook_url: str, is_auto_sync: bool = True):
+    cur = execute(conn, "SELECT id FROM event_integrations WHERE event_id=%s", (event_id,))
+    row = cur.fetchone()
+    if row:
+        execute(conn, """
+            UPDATE event_integrations 
+            SET google_sheets_webhook_url=%s, is_auto_sync_enabled=%s 
+            WHERE event_id=%s
+        """, (webhook_url, is_auto_sync, event_id))
+    else:
+        execute(conn, """
+            INSERT INTO event_integrations (event_id, google_sheets_webhook_url, is_auto_sync_enabled)
+            VALUES (%s, %s, %s)
+        """, (event_id, webhook_url, is_auto_sync))
 
 @router.get("/google-sheets")
 def get_google_sheets_config(event_id: int, conn=Depends(get_db), user=Depends(get_current_user)):
@@ -48,15 +75,8 @@ def get_google_sheets_config(event_id: int, conn=Depends(get_db), user=Depends(g
 def save_google_sheets_config(data: GoogleSheetsConfig, conn=Depends(get_db), user=Depends(get_current_user)):
     ensure_integrations_schema(conn)
 
-    clean_url = data.webhook_url.strip()
-
-    execute(conn, """
-        INSERT INTO event_integrations (event_id, google_sheets_webhook_url, is_auto_sync_enabled)
-        VALUES (%s, %s, %s)
-        ON CONFLICT (event_id) DO UPDATE SET
-            google_sheets_webhook_url = EXCLUDED.google_sheets_webhook_url,
-            is_auto_sync_enabled = EXCLUDED.is_auto_sync_enabled
-    """, (data.event_id, clean_url, data.is_auto_sync_enabled))
+    clean_url = _clean_webhook_url(data.webhook_url)
+    _upsert_webhook_url(conn, data.event_id, clean_url, data.is_auto_sync_enabled)
 
     return {"ok": True, "message": "Google Sheets live sync settings updated!"}
 
@@ -64,20 +84,15 @@ def save_google_sheets_config(data: GoogleSheetsConfig, conn=Depends(get_db), us
 def trigger_sync_all(data: SyncAllRequest, conn=Depends(get_db), user=Depends(get_current_user)):
     ensure_integrations_schema(conn)
 
-    webhook_url = (data.webhook_url or "").strip()
+    webhook_url = _clean_webhook_url(data.webhook_url or "")
 
     if webhook_url:
-        run_safely(conn, lambda: execute(conn, """
-            INSERT INTO event_integrations (event_id, google_sheets_webhook_url, is_auto_sync_enabled)
-            VALUES (%s, %s, TRUE)
-            ON CONFLICT (event_id) DO UPDATE SET
-                google_sheets_webhook_url = EXCLUDED.google_sheets_webhook_url
-        """, (data.event_id, webhook_url)))
+        _upsert_webhook_url(conn, data.event_id, webhook_url, True)
     else:
         cur_cfg = execute(conn, "SELECT google_sheets_webhook_url FROM event_integrations WHERE event_id=%s", (data.event_id,))
         row_cfg = cur_cfg.fetchone()
         if row_cfg and row_cfg.get("google_sheets_webhook_url"):
-            webhook_url = row_cfg["google_sheets_webhook_url"].strip()
+            webhook_url = _clean_webhook_url(row_cfg["google_sheets_webhook_url"])
 
     if not webhook_url or not webhook_url.startswith("http"):
         raise HTTPException(status_code=400, detail="Please configure a Google Sheets Webhook URL first.")
