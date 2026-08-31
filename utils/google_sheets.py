@@ -43,7 +43,7 @@ function syncFullEventLedger(ss, payload) {
   summarySheet.clear();
   summarySheet.appendRow(["Event Name", payload.event_name || "EventLedger AI"]);
   summarySheet.appendRow(["Last Synced", new Date().toLocaleString()]);
-  summarySheet.appendRow([]);
+  summarySheet.appendRow([""]);
   summarySheet.appendRow(["Metric", "Estimated Amount (₹)", "Actual Amount (₹)", "Variance (Over/Under ₹)"]);
   
   var estBudget = payload.summary ? payload.summary.total_estimated_budget : 0;
