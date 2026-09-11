@@ -108,17 +108,30 @@ def trigger_sync_all(data: SyncAllRequest, conn=Depends(get_db), user=Depends(ge
     if not webhook_url or not webhook_url.startswith("http"):
         raise HTTPException(status_code=400, detail="Please configure a Google Sheets Webhook URL first.")
 
-    # 1. Fetch Event Info
-    cur_e = execute(conn, "SELECT name FROM events WHERE id=%s", (data.event_id,))
-    ev = cur_e.fetchone()
-    ev_name = ev["name"] if ev else "Event"
+    # 1. Fetch Event Info safely
+    ev_name = "Event"
+    try:
+        cur_e = execute(conn, "SELECT name FROM events WHERE id=%s", (data.event_id,))
+        ev = cur_e.fetchone()
+        if ev and ev.get("name"):
+            ev_name = ev["name"]
+    except Exception:
+        pass
 
-    # 2. Fetch Income Records (Estimated & Actual)
-    cur_est_inc = execute(conn, "SELECT * FROM estimated_income WHERE event_id=%s ORDER BY id DESC", (data.event_id,))
-    est_income_rows = [dict(r) for r in cur_est_inc.fetchall()]
+    # 2. Fetch Income Records (Estimated & Actual) safely
+    est_income_rows = []
+    try:
+        cur_est_inc = execute(conn, "SELECT * FROM estimated_income WHERE event_id=%s ORDER BY id DESC", (data.event_id,))
+        est_income_rows = [dict(r) for r in cur_est_inc.fetchall()]
+    except Exception:
+        pass
 
-    cur_act_inc = execute(conn, "SELECT * FROM actual_income WHERE event_id=%s ORDER BY id DESC", (data.event_id,))
-    act_income_rows = [dict(r) for r in cur_act_inc.fetchall()]
+    act_income_rows = []
+    try:
+        cur_act_inc = execute(conn, "SELECT * FROM actual_income WHERE event_id=%s ORDER BY id DESC", (data.event_id,))
+        act_income_rows = [dict(r) for r in cur_act_inc.fetchall()]
+    except Exception:
+        pass
 
     combined_income = []
     for r in est_income_rows:
@@ -148,22 +161,30 @@ def trigger_sync_all(data: SyncAllRequest, conn=Depends(get_db), user=Depends(ge
             "notes": r.get("notes", "")
         })
 
-    # 3. Fetch Expense Records (Estimated & Actual)
-    cur_est_exp = execute(conn, """
-        SELECT e.*, d.name as dept_name
-        FROM estimated_expenses e
-        LEFT JOIN departments d ON d.id = e.department_id
-        WHERE e.event_id = %s ORDER BY e.id DESC
-    """, (data.event_id,))
-    est_expense_rows = [dict(r) for r in cur_est_exp.fetchall()]
+    # 3. Fetch Expense Records safely
+    est_expense_rows = []
+    try:
+        cur_est_exp = execute(conn, """
+            SELECT e.*, d.name as dept_name
+            FROM estimated_expenses e
+            LEFT JOIN departments d ON d.id = e.department_id
+            WHERE e.event_id = %s ORDER BY e.id DESC
+        """, (data.event_id,))
+        est_expense_rows = [dict(r) for r in cur_est_exp.fetchall()]
+    except Exception:
+        pass
 
-    cur_act_exp = execute(conn, """
-        SELECT e.*, d.name as dept_name
-        FROM actual_expenses e
-        LEFT JOIN departments d ON d.id = e.department_id
-        WHERE e.event_id = %s ORDER BY e.id DESC
-    """, (data.event_id,))
-    act_expense_rows = [dict(r) for r in cur_act_exp.fetchall()]
+    act_expense_rows = []
+    try:
+        cur_act_exp = execute(conn, """
+            SELECT e.*, d.name as dept_name
+            FROM actual_expenses e
+            LEFT JOIN departments d ON d.id = e.department_id
+            WHERE e.event_id = %s ORDER BY e.id DESC
+        """, (data.event_id,))
+        act_expense_rows = [dict(r) for r in cur_act_exp.fetchall()]
+    except Exception:
+        pass
 
     combined_expenses = []
     for r in est_expense_rows:
@@ -195,29 +216,39 @@ def trigger_sync_all(data: SyncAllRequest, conn=Depends(get_db), user=Depends(ge
             "notes": r.get("description") or r.get("notes") or ""
         })
 
-    # 4. Fetch Budget Proposals
-    cur_prop = execute(conn, """
-        SELECT p.*, d.name as dept_name,
-               COALESCE((SELECT SUM(COALESCE(li.total_amount, li.unit_price * li.quantity, li.estimated_cost, 0)) 
-                         FROM budget_line_items li WHERE li.proposal_id = p.id), 0) as total_amount
-        FROM budget_proposals p
-        LEFT JOIN departments d ON d.id = p.department_id
-        WHERE p.event_id = %s ORDER BY p.id DESC
-    """, (data.event_id,))
-    proposals_list = [dict(r) for r in cur_prop.fetchall()]
+    # 4. Fetch Budget Proposals safely
+    proposals_list = []
+    try:
+        cur_prop = execute(conn, """
+            SELECT p.*, d.name as dept_name
+            FROM budget_proposals p
+            LEFT JOIN departments d ON d.id = p.department_id
+            WHERE p.event_id = %s ORDER BY p.id DESC
+        """, (data.event_id,))
+        proposals_list = [dict(r) for r in cur_prop.fetchall()]
+    except Exception:
+        pass
 
-    # 5. Fetch Sponsors
-    cur_sp = execute(conn, "SELECT * FROM sponsors WHERE event_id=%s ORDER BY id DESC", (data.event_id,))
-    sponsors_list = [dict(r) for r in cur_sp.fetchall()]
+    # 5. Fetch Sponsors safely
+    sponsors_list = []
+    try:
+        cur_sp = execute(conn, "SELECT * FROM sponsors WHERE event_id=%s ORDER BY id DESC", (data.event_id,))
+        sponsors_list = [dict(r) for r in cur_sp.fetchall()]
+    except Exception:
+        pass
 
-    # 6. Fetch Vendors
-    cur_v = execute(conn, "SELECT * FROM vendors WHERE event_id=%s ORDER BY id DESC", (data.event_id,))
-    vendors_list = [dict(r) for r in cur_v.fetchall()]
+    # 6. Fetch Vendors safely
+    vendors_list = []
+    try:
+        cur_v = execute(conn, "SELECT * FROM vendors WHERE event_id=%s ORDER BY id DESC", (data.event_id,))
+        vendors_list = [dict(r) for r in cur_v.fetchall()]
+    except Exception:
+        pass
 
     # Calculate Totals for Summary
-    total_est_budget = sum(float(r.get("amount") or 0) for r in est_expense_rows) + sum(float(p.get("total_amount") or 0) for p in proposals_list)
+    total_est_budget = sum(float(r.get("amount") or 0) for r in est_expense_rows)
     total_act_expenses = sum(float(r.get("amount") or 0) for r in act_expense_rows)
-    total_est_income = sum(float(r.get("amount") or 0) for r in est_income_rows) + sum(float(s.get("promised_amount") or 0) for s in sponsors_list)
+    total_est_income = sum(float(r.get("amount") or 0) for r in est_income_rows) + sum(float(s.get("promised_amount") or s.get("amount") or 0) for s in sponsors_list)
     total_act_income = sum(float(r.get("amount") or 0) for r in act_income_rows) + sum(float(s.get("amount_received") or 0) for s in sponsors_list)
 
     payload = {
