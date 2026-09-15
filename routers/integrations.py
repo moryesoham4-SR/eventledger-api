@@ -368,9 +368,21 @@ def trigger_sync_all(data: SyncAllRequest, conn=Depends(get_db), user=Depends(ge
         "vendors": vendors_list,
     }
 
+    def _on_success():
+        try:
+            from core.database import get_pool
+            p = get_pool()
+            c = p.getconn()
+            try:
+                execute(c, "UPDATE event_integrations SET last_synced_at=CURRENT_TIMESTAMP WHERE event_id=%s", (data.event_id,))
+                c.commit()
+            finally:
+                p.putconn(c)
+        except Exception as e:
+            print(f"Error updating last_synced_at: {e}")
+
     # Dispatch via background thread
-    threading.Thread(target=_dispatch_http_post, args=(webhook_url, payload), daemon=True).start()
+    threading.Thread(target=_dispatch_http_post, args=(webhook_url, payload, _on_success), daemon=True).start()
 
-    run_safely(conn, lambda: execute(conn, "UPDATE event_integrations SET last_synced_at=CURRENT_TIMESTAMP WHERE event_id=%s", (data.event_id,)))
+    return {"ok": True, "message": f"Full EventLedger data for {ev_name} syncing to Google Sheets! 📊"}
 
-    return {"ok": True, "message": f"Full EventLedger data for {ev_name} synced to Google Sheets! 📊"}

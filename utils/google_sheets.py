@@ -41,133 +41,146 @@ function syncFullEventLedger(ss, payload) {
   // 1. Financial Summary Tab
   var summarySheet = getOrCreateSheet(ss, "📊 Financial Summary");
   summarySheet.clear();
-  summarySheet.appendRow(["Event Name", payload.event_name || "EventLedger AI"]);
-  summarySheet.appendRow(["Last Synced", new Date().toLocaleString()]);
-  summarySheet.appendRow([""]);
-  summarySheet.appendRow(["Metric", "Estimated Amount (₹)", "Actual Amount (₹)", "Variance (Over/Under ₹)"]);
-  
+  var summaryRows = [
+    ["Event Name", payload.event_name || "EventLedger AI", "", ""],
+    ["Last Synced", new Date().toLocaleString(), "", ""],
+    ["", "", "", ""],
+    ["Metric", "Estimated Amount (₹)", "Actual Amount (₹)", "Variance (Over/Under ₹)"]
+  ];
   var estBudget = payload.summary ? Number(payload.summary.total_estimated_budget || 0) : 0;
   var actExpense = payload.summary ? Number(payload.summary.total_actual_expenses || 0) : 0;
   var estIncome = payload.summary ? Number(payload.summary.total_estimated_income || 0) : 0;
   var actIncome = payload.summary ? Number(payload.summary.total_actual_income || 0) : 0;
   
-  summarySheet.appendRow(["Total Budget / Expenses", estBudget, actExpense, estBudget - actExpense]);
-  summarySheet.appendRow(["Total Income / Revenue", estIncome, actIncome, actIncome - estIncome]);
-  summarySheet.appendRow(["Net Financial Margin", estIncome - estBudget, actIncome - actExpense, (actIncome - actExpense) - (estIncome - estBudget)]);
-  formatHeaderRow(summarySheet, 4);
+  summaryRows.push(["Total Budget / Expenses", estBudget, actExpense, estBudget - actExpense]);
+  summaryRows.push(["Total Income / Revenue", estIncome, actIncome, actIncome - estIncome]);
+  summaryRows.push(["Net Financial Margin", estIncome - estBudget, actIncome - actExpense, (actIncome - actExpense) - (estIncome - estBudget)]);
+  
+  summarySheet.getRange(1, 1, summaryRows.length, 4).setValues(summaryRows);
+  formatHeaderRow(summarySheet, 4, 4);
 
   // 2. Income Tab (Estimated vs Actual)
   var incomeSheet = getOrCreateSheet(ss, "💰 Income (Est vs Actual)");
   incomeSheet.clear();
-  incomeSheet.appendRow(["ID", "Type", "Title / Source", "Category", "Target Estimated (₹)", "Actual Received (₹)", "Variance (₹)", "Payment Method", "Status", "Date", "Notes"]);
+  var incomeHeaders = ["ID", "Type", "Title / Source", "Category", "Target Estimated (₹)", "Actual Received (₹)", "Variance (₹)", "Payment Method", "Status", "Date", "Notes"];
+  var incomeRows = [incomeHeaders];
   if (payload.income && payload.income.length > 0) {
     payload.income.forEach(function(row) {
       var est = Number(row.target_amount || (row.type === 'Estimated' ? row.amount : 0) || 0);
       var act = Number(row.actual_amount || (row.type === 'Actual' ? row.amount : 0) || 0);
-      incomeSheet.appendRow([
-        row.id || "INC",
-        row.type || (act > 0 ? "Actual" : "Estimated"),
-        row.title || row.source || "Income Source",
-        row.category || "General",
+      incomeRows.push([
+        String(row.id || "INC"),
+        String(row.type || (act > 0 ? "Actual" : "Estimated")),
+        String(row.title || row.source || "Income Source"),
+        String(row.category || "General"),
         est,
         act,
         act - est,
-        row.payment_method || row.payment_mode || "N/A",
-        row.status || (act > 0 ? "Received" : "Planned"),
-        row.date || row.received_on || "",
-        row.notes || ""
+        String(row.payment_method || row.payment_mode || "N/A"),
+        String(row.status || (act > 0 ? "Received" : "Planned")),
+        String(row.date || row.received_on || ""),
+        String(row.notes || "")
       ]);
     });
   }
-  formatHeaderRow(incomeSheet, 1);
+  incomeSheet.getRange(1, 1, incomeRows.length, incomeHeaders.length).setValues(incomeRows);
+  formatHeaderRow(incomeSheet, 1, incomeHeaders.length);
 
   // 3. Expenses Tab (Estimated vs Actual)
   var expenseSheet = getOrCreateSheet(ss, "💸 Expenses (Est vs Actual)");
   expenseSheet.clear();
-  expenseSheet.appendRow(["ID", "Type", "Title / Item", "Department", "Category", "Estimated Budget (₹)", "Actual Spent (₹)", "Variance (₹)", "Receipt URL", "Payment Method", "Date", "Notes"]);
+  var expenseHeaders = ["ID", "Type", "Title / Item", "Department", "Category", "Estimated Budget (₹)", "Actual Spent (₹)", "Variance (₹)", "Receipt URL", "Payment Method", "Date", "Notes"];
+  var expenseRows = [expenseHeaders];
   if (payload.expenses && payload.expenses.length > 0) {
     payload.expenses.forEach(function(row) {
       var est = Number(row.estimated_cost || (row.type === 'Estimated' ? row.amount : 0) || 0);
       var act = Number(row.actual_spent || (row.type === 'Actual' ? row.amount : 0) || 0);
-      expenseSheet.appendRow([
-        row.id || "EXP",
-        row.type || (act > 0 ? "Actual" : "Estimated"),
-        row.title || row.item_name || "Expense Item",
-        row.dept_name || "General",
-        row.category || "General",
+      expenseRows.push([
+        String(row.id || "EXP"),
+        String(row.type || (act > 0 ? "Actual" : "Estimated")),
+        String(row.title || row.item_name || "Expense Item"),
+        String(row.dept_name || "General"),
+        String(row.category || "General"),
         est,
         act,
         est - act,
-        row.receipt_url || "",
-        row.payment_method || row.payment_mode || "N/A",
-        row.date || row.paid_on || "",
-        row.notes || row.description || ""
+        String(row.receipt_url || ""),
+        String(row.payment_method || row.payment_mode || "N/A"),
+        String(row.date || row.paid_on || ""),
+        String(row.notes || row.description || "")
       ]);
     });
   }
-  formatHeaderRow(expenseSheet, 1);
+  expenseSheet.getRange(1, 1, expenseRows.length, expenseHeaders.length).setValues(expenseRows);
+  formatHeaderRow(expenseSheet, 1, expenseHeaders.length);
 
   // 4. Budget Proposals Tab
   var budgetSheet = getOrCreateSheet(ss, "📑 Department Proposals");
   budgetSheet.clear();
-  budgetSheet.appendRow(["ID", "Department", "Proposal Title", "Requested Total (₹)", "Status", "Notes"]);
+  var budgetHeaders = ["ID", "Department", "Proposal Title", "Requested Total (₹)", "Status", "Notes"];
+  var budgetRows = [budgetHeaders];
   if (payload.proposals && payload.proposals.length > 0) {
     payload.proposals.forEach(function(row) {
-      budgetSheet.appendRow([
-        row.id || "PROP",
-        row.dept_name || "General",
-        row.title || "Budget Proposal",
+      budgetRows.push([
+        String(row.id || "PROP"),
+        String(row.dept_name || "General"),
+        String(row.title || "Budget Proposal"),
         Number(row.total_amount || 0),
-        row.status || "Pending",
-        row.notes || row.description || ""
+        String(row.status || "Pending"),
+        String(row.notes || row.description || "")
       ]);
     });
   }
-  formatHeaderRow(budgetSheet, 1);
+  budgetSheet.getRange(1, 1, budgetRows.length, budgetHeaders.length).setValues(budgetRows);
+  formatHeaderRow(budgetSheet, 1, budgetHeaders.length);
 
   // 5. Sponsors Tab
   var sponsorSheet = getOrCreateSheet(ss, "🤝 Sponsors");
   sponsorSheet.clear();
-  sponsorSheet.appendRow(["ID", "Sponsor Company", "Tier", "Committed Amount (₹)", "Received Amount (₹)", "Contact Person", "Contact Email", "Status", "Notes"]);
+  var sponsorHeaders = ["ID", "Sponsor Company", "Tier", "Committed Amount (₹)", "Received Amount (₹)", "Contact Person", "Contact Email", "Status", "Notes"];
+  var sponsorRows = [sponsorHeaders];
   if (payload.sponsors && payload.sponsors.length > 0) {
     payload.sponsors.forEach(function(row) {
       var committed = Number(row.committed_amount || row.promised_amount || row.amount || 0);
       var received = Number(row.received_amount || row.amount_received || 0);
-      sponsorSheet.appendRow([
-        row.id || "SPN",
-        row.name || row.company || "Sponsor",
-        row.tier || "General",
+      sponsorRows.push([
+        String(row.id || "SPN"),
+        String(row.name || row.company || "Sponsor"),
+        String(row.tier || "General"),
         committed,
         received,
-        row.contact_name || "",
-        row.contact_email || "",
-        row.status || "Pledged",
-        row.notes || ""
+        String(row.contact_name || ""),
+        String(row.contact_email || ""),
+        String(row.status || "Pledged"),
+        String(row.notes || "")
       ]);
     });
   }
-  formatHeaderRow(sponsorSheet, 1);
+  sponsorSheet.getRange(1, 1, sponsorRows.length, sponsorHeaders.length).setValues(sponsorRows);
+  formatHeaderRow(sponsorSheet, 1, sponsorHeaders.length);
 
   // 6. Vendors Tab
   var vendorSheet = getOrCreateSheet(ss, "🏢 Vendors & Quotes");
   vendorSheet.clear();
-  vendorSheet.appendRow(["ID", "Vendor Name", "Category", "Contract / Quote (₹)", "Contact Name", "Contact Email / Phone", "Status", "Notes"]);
+  var vendorHeaders = ["ID", "Vendor Name", "Category", "Contract / Quote (₹)", "Contact Name", "Contact Email / Phone", "Status", "Notes"];
+  var vendorRows = [vendorHeaders];
   if (payload.vendors && payload.vendors.length > 0) {
     payload.vendors.forEach(function(row) {
       var val = Number(row.contract_value || row.quoted_price || row.amount || 0);
-      vendorSheet.appendRow([
-        row.id || "VND",
-        row.name || "Vendor",
-        row.category || "Service",
+      vendorRows.push([
+        String(row.id || "VND"),
+        String(row.name || "Vendor"),
+        String(row.category || "Service"),
         val,
-        row.contact_name || "",
-        row.phone || row.contact_email || "",
-        row.status || "Active",
-        row.notes || ""
+        String(row.contact_name || ""),
+        String(row.phone || row.contact_email || ""),
+        String(row.status || "Active"),
+        String(row.notes || "")
       ]);
     });
   }
-  formatHeaderRow(vendorSheet, 1);
+  vendorSheet.getRange(1, 1, vendorRows.length, vendorHeaders.length).setValues(vendorRows);
+  formatHeaderRow(vendorSheet, 1, vendorHeaders.length);
 }
 
 function appendSingleRecord(ss, payload) {
@@ -191,15 +204,16 @@ function getOrCreateSheet(ss, name) {
   return sheet;
 }
 
-function formatHeaderRow(sheet, rowNum) {
+function formatHeaderRow(sheet, rowNum, numCols) {
   try {
-    var range = sheet.getRange(rowNum, 1, 1, sheet.getLastColumn());
+    var cols = numCols || sheet.getLastColumn() || 1;
+    var range = sheet.getRange(rowNum, 1, 1, cols);
     range.setBackground("#1e293b").setFontColor("#ffffff").setFontWeight("bold");
   } catch (err) {}
 }
 """
 
-def _dispatch_http_post(url: str, payload: dict):
+def _dispatch_http_post(url: str, payload: dict, on_success=None):
     try:
         data_bytes = json.dumps(payload).encode('utf-8')
         req = urllib.request.Request(
@@ -208,9 +222,14 @@ def _dispatch_http_post(url: str, payload: dict):
             headers={'Content-Type': 'application/json', 'User-Agent': 'EventLedgerAI/2.5'},
             method='POST'
         )
-        with urllib.request.urlopen(req, timeout=8) as response:
+        with urllib.request.urlopen(req, timeout=45) as response:
             res_body = response.read().decode('utf-8')
             print(f"Google Sheets Sync Success: {res_body[:100]}")
+            if on_success:
+                try:
+                    on_success()
+                except Exception as cb_err:
+                    print(f"on_success callback error: {cb_err}")
     except Exception as err:
         print(f"Google Sheets Sync Error: {err}")
 

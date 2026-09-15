@@ -18,7 +18,7 @@ class DeptCreate(BaseModel):
 class AssignMemberRequest(BaseModel):
     event_id: int
     user_id: int
-    role: str = "volunteer"  # 'co_leader', 'co_head', 'event_admin', 'dept_head', or 'volunteer'
+    role: str = "volunteer"  # 'co_leader', 'event_admin', 'dept_head', or 'volunteer'
 
 class DemeritPenaltyRequest(BaseModel):
     demerit_points: int
