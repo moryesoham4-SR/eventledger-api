@@ -4,6 +4,7 @@ from typing import Optional
 from core.database import get_db, execute
 from core.auth import get_current_user
 from utils.db_safety import run_safely
+from utils.roles import get_event_role
 from utils.google_sheets import GOOGLE_APPS_SCRIPT_TEMPLATE, _dispatch_http_post
 import threading
 
@@ -81,27 +82,36 @@ def _upsert_webhook_url(conn, event_id: int, webhook_url: str, spreadsheet_url: 
             VALUES (%s, %s, %s, %s, %s)
         """, (event_id, webhook_url, spreadsheet_url, sheet_name, is_auto_sync))
 
+def _require_user_event_access(conn, user, event_id: int):
+    role_ctx = get_event_role(conn, user, event_id)
+    if role_ctx.get("level") is None:
+        raise HTTPException(status_code=403, detail="You do not have access to this event.")
+    return role_ctx
+
 @router.get("/google-sheets/all")
 def get_all_google_sheets_integrations(conn=Depends(get_db), user=Depends(get_current_user)):
     ensure_integrations_schema(conn)
 
     cur = execute(conn, """
-        SELECT e.id as event_id, e.name as event_name, 
+        SELECT DISTINCT e.id as event_id, e.name as event_name, 
                COALESCE(i.google_sheets_webhook_url, '') as webhook_url,
                COALESCE(i.google_sheets_spreadsheet_url, '') as spreadsheet_url,
                COALESCE(i.sheet_name, '') as sheet_name,
                COALESCE(i.is_auto_sync_enabled, TRUE) as is_auto_sync_enabled,
                i.last_synced_at
         FROM events e
+        LEFT JOIN user_event_roles r ON r.event_id=e.id AND r.user_id=%s
         LEFT JOIN event_integrations i ON i.event_id = e.id
+        WHERE e.user_id=%s OR r.user_id=%s
         ORDER BY e.id DESC
-    """)
+    """, (user["id"], user["id"], user["id"]))
     rows = [dict(r) for r in cur.fetchall()]
     return rows
 
 @router.get("/google-sheets")
 def get_google_sheets_config(event_id: int, conn=Depends(get_db), user=Depends(get_current_user)):
     ensure_integrations_schema(conn)
+    _require_user_event_access(conn, user, event_id)
 
     cur = execute(conn, "SELECT * FROM event_integrations WHERE event_id=%s", (event_id,))
     row = cur.fetchone()
@@ -119,6 +129,7 @@ def get_google_sheets_config(event_id: int, conn=Depends(get_db), user=Depends(g
 @router.post("/google-sheets")
 def save_google_sheets_config(data: GoogleSheetsConfig, conn=Depends(get_db), user=Depends(get_current_user)):
     ensure_integrations_schema(conn)
+    _require_user_event_access(conn, user, data.event_id)
 
     clean_url = _clean_webhook_url(data.webhook_url)
     _upsert_webhook_url(conn, data.event_id, clean_url, data.spreadsheet_url or "", data.sheet_name or "", data.is_auto_sync_enabled)
@@ -128,6 +139,7 @@ def save_google_sheets_config(data: GoogleSheetsConfig, conn=Depends(get_db), us
 @router.post("/google-sheets/sync-all")
 def trigger_sync_all(data: SyncAllRequest, conn=Depends(get_db), user=Depends(get_current_user)):
     ensure_integrations_schema(conn)
+    _require_user_event_access(conn, user, data.event_id)
 
     webhook_url = _clean_webhook_url(data.webhook_url or "")
 
@@ -169,30 +181,36 @@ def trigger_sync_all(data: SyncAllRequest, conn=Depends(get_db), user=Depends(ge
 
     combined_income = []
     for r in est_income_rows:
+        amt = float(r.get("amount") or 0)
         combined_income.append({
             "id": f"EST-{r.get('id')}",
             "type": "Estimated",
-            "source": r.get("source", ""),
-            "category": r.get("category", "General"),
-            "target_amount": float(r.get("amount") or 0),
+            "source": r.get("source", "") or "Income",
+            "title": r.get("source", "") or "Income",
+            "category": r.get("category", "General") or "General",
+            "target_amount": amt,
+            "amount": amt,
             "actual_amount": 0,
             "payment_method": "-",
             "status": "Planned",
             "date": "",
-            "notes": r.get("notes", "")
+            "notes": r.get("notes", "") or ""
         })
     for r in act_income_rows:
+        amt = float(r.get("amount") or 0)
         combined_income.append({
             "id": f"ACT-{r.get('id')}",
             "type": "Actual",
-            "source": r.get("source", ""),
-            "category": r.get("category", "General"),
+            "source": r.get("source", "") or "Income",
+            "title": r.get("source", "") or "Income",
+            "category": r.get("category", "General") or "General",
             "target_amount": 0,
-            "actual_amount": float(r.get("amount") or 0),
-            "payment_method": r.get("payment_mode", "Cash"),
+            "amount": amt,
+            "actual_amount": amt,
+            "payment_method": r.get("payment_mode", "Cash") or "Cash",
             "status": "Received",
             "date": str(r.get("received_on") or ""),
-            "notes": r.get("notes", "")
+            "notes": r.get("notes", "") or ""
         })
 
     # 3. Fetch Expense Records safely
@@ -222,30 +240,38 @@ def trigger_sync_all(data: SyncAllRequest, conn=Depends(get_db), user=Depends(ge
 
     combined_expenses = []
     for r in est_expense_rows:
+        amt = float(r.get("amount") or 0)
+        title = r.get("item_name") or r.get("category") or "Expense Item"
         combined_expenses.append({
             "id": f"EST-{r.get('id')}",
             "type": "Estimated",
-            "title": r.get("item_name") or r.get("category") or "Item",
+            "title": title,
+            "item_name": title,
             "dept_name": r.get("dept_name") or "General",
-            "category": r.get("category", "General"),
-            "estimated_cost": float(r.get("amount") or 0),
-            "amount": 0,
+            "category": r.get("category", "General") or "General",
+            "estimated_cost": amt,
+            "amount": amt,
+            "actual_spent": 0,
             "receipt_url": "",
             "payment_method": "-",
             "date": "",
             "notes": r.get("description") or r.get("notes") or ""
         })
     for r in act_expense_rows:
+        amt = float(r.get("amount") or 0)
+        title = r.get("item_name") or r.get("category") or "Expense Item"
         combined_expenses.append({
             "id": f"ACT-{r.get('id')}",
             "type": "Actual",
-            "title": r.get("item_name") or r.get("category") or "Item",
+            "title": title,
+            "item_name": title,
             "dept_name": r.get("dept_name") or "General",
-            "category": r.get("category", "General"),
+            "category": r.get("category", "General") or "General",
             "estimated_cost": 0,
-            "amount": float(r.get("amount") or 0),
+            "amount": amt,
+            "actual_spent": amt,
             "receipt_url": "",
-            "payment_method": r.get("payment_mode", "Cash"),
+            "payment_method": r.get("payment_mode", "Cash") or "Cash",
             "date": str(r.get("paid_on") or ""),
             "notes": r.get("description") or r.get("notes") or ""
         })
@@ -254,12 +280,22 @@ def trigger_sync_all(data: SyncAllRequest, conn=Depends(get_db), user=Depends(ge
     proposals_list = []
     try:
         cur_prop = execute(conn, """
-            SELECT p.*, d.name as dept_name
+            SELECT p.*, d.name as dept_name,
+                   COALESCE((SELECT SUM(COALESCE(li.total_amount, li.unit_price * li.quantity, li.estimated_cost, 0)) 
+                             FROM budget_line_items li WHERE li.proposal_id = p.id), 0) as total_amount
             FROM budget_proposals p
             LEFT JOIN departments d ON d.id = p.department_id
             WHERE p.event_id = %s ORDER BY p.id DESC
         """, (data.event_id,))
-        proposals_list = [dict(r) for r in cur_prop.fetchall()]
+        for r in cur_prop.fetchall():
+            proposals_list.append({
+                "id": r["id"],
+                "dept_name": r.get("dept_name") or "General",
+                "title": r.get("title") or "Budget Proposal",
+                "total_amount": float(r.get("total_amount") or 0),
+                "status": r.get("status") or "Pending",
+                "notes": r.get("notes") or r.get("description") or ""
+            })
     except Exception:
         pass
 
@@ -267,7 +303,23 @@ def trigger_sync_all(data: SyncAllRequest, conn=Depends(get_db), user=Depends(ge
     sponsors_list = []
     try:
         cur_sp = execute(conn, "SELECT * FROM sponsors WHERE event_id=%s ORDER BY id DESC", (data.event_id,))
-        sponsors_list = [dict(r) for r in cur_sp.fetchall()]
+        for r in cur_sp.fetchall():
+            committed = float(r.get("promised_amount") or r.get("amount") or 0)
+            received = float(r.get("amount_received") or 0)
+            sponsors_list.append({
+                "id": r["id"],
+                "name": r.get("name") or r.get("company") or "Sponsor",
+                "company": r.get("name") or r.get("company") or "Sponsor",
+                "tier": r.get("tier") or "General",
+                "committed_amount": committed,
+                "amount": committed,
+                "received_amount": received,
+                "amount_received": received,
+                "contact_name": r.get("contact_name") or "",
+                "contact_email": r.get("contact_email") or "",
+                "status": r.get("status") or "Pledged",
+                "notes": r.get("notes") or ""
+            })
     except Exception:
         pass
 
@@ -275,15 +327,29 @@ def trigger_sync_all(data: SyncAllRequest, conn=Depends(get_db), user=Depends(ge
     vendors_list = []
     try:
         cur_v = execute(conn, "SELECT * FROM vendors WHERE event_id=%s ORDER BY id DESC", (data.event_id,))
-        vendors_list = [dict(r) for r in cur_v.fetchall()]
+        for r in cur_v.fetchall():
+            cval = float(r.get("contract_value") or r.get("quoted_price") or r.get("amount") or 0)
+            vendors_list.append({
+                "id": r["id"],
+                "name": r.get("name") or "Vendor",
+                "category": r.get("category") or "Service",
+                "contract_value": cval,
+                "quoted_price": cval,
+                "paid_amount": cval,
+                "contact_name": r.get("contact_name") or "",
+                "phone": r.get("contact_email") or "",
+                "contact_email": r.get("contact_email") or "",
+                "status": r.get("status") or "Active",
+                "notes": r.get("notes") or ""
+            })
     except Exception:
         pass
 
     # Calculate Totals for Summary
     total_est_budget = sum(float(r.get("amount") or 0) for r in est_expense_rows)
     total_act_expenses = sum(float(r.get("amount") or 0) for r in act_expense_rows)
-    total_est_income = sum(float(r.get("amount") or 0) for r in est_income_rows) + sum(float(s.get("promised_amount") or s.get("amount") or 0) for s in sponsors_list)
-    total_act_income = sum(float(r.get("amount") or 0) for r in act_income_rows) + sum(float(s.get("amount_received") or 0) for s in sponsors_list)
+    total_est_income = sum(float(r.get("amount") or 0) for r in est_income_rows) + sum(float(s.get("committed_amount") or 0) for s in sponsors_list)
+    total_act_income = sum(float(r.get("amount") or 0) for r in act_income_rows) + sum(float(s.get("received_amount") or 0) for s in sponsors_list)
 
     payload = {
         "action": "sync_all",
